@@ -1,0 +1,9 @@
+{
+    "name": "xss-verifier",
+    "version": "1.0.0",
+    "description": "XSS verification using Playwright",
+    "main": "verify_xss.js",
+    "dependencies": {
+        "playwright": "^1.40.0"
+    }
+}

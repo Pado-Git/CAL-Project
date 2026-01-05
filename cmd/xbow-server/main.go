@@ -1,0 +1,79 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"cal-project/internal/brain/commander"
+	"cal-project/internal/brain/llm"
+	"cal-project/internal/core/bus"
+	"cal-project/internal/core/orchestrator"
+
+	"github.com/joho/godotenv"
+)
+
+func main() {
+	// Load .env file
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using system environment variables")
+	}
+
+	fmt.Println("CAL-like Autonomous Security Platform Starting...")
+	fmt.Println("mode: Distributed Multi-Agent System (Go)")
+
+	ctx := context.Background()
+
+	// 1. Initialize Event Bus
+	eventBus := bus.NewMemoryBus(100)
+
+	// 2. Initialize Orchestrator
+	orch := orchestrator.NewOrchestrator(eventBus)
+
+	// 3. Initialize LLM Client (Gemini)
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		log.Fatal("GEMINI_API_KEY environment variable not set")
+	}
+
+	modelName := os.Getenv("GEMINI_MODEL")
+	if modelName == "" {
+		modelName = "gemini-2.0-flash-exp" // Default model
+	}
+
+	llmClient, err := llm.NewGeminiClient(ctx, apiKey, modelName)
+	if err != nil {
+		log.Fatalf("Failed to create LLM client: %v", err)
+	}
+	defer llmClient.Close()
+
+	// 4. Initialize Commander Agent
+	targetURL := os.Getenv("TARGET_URL")
+	if targetURL == "" {
+		targetURL = "http://example.com" // Default fallback
+	}
+	cmdr := commander.NewCommander(ctx, eventBus, llmClient, targetURL)
+	orch.RegisterAgent(cmdr)
+
+	// 5. Start System
+	orch.Start()
+
+	// 6. Wait for tasks to complete or user interrupt
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Give agents time to work (60 seconds) or wait for manual interrupt
+	select {
+	case <-sigChan:
+		log.Println("User interrupt received")
+	case <-time.After(60 * time.Second):
+		log.Println("Timeout reached (60s)")
+	}
+
+	orch.Stop()
+	log.Println("System halted.")
+}
