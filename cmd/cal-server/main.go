@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -13,11 +14,22 @@ import (
 	"cal-project/internal/brain/llm"
 	"cal-project/internal/core/bus"
 	"cal-project/internal/core/orchestrator"
+	"cal-project/internal/core/reporter"
 
 	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Setup Multi-writer logging (Console + File)
+	logFile, err := os.OpenFile("cal-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+	defer logFile.Close()
+
+	mw := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(mw)
+
 	// Load .env file
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using system environment variables")
@@ -59,7 +71,11 @@ func main() {
 	cmdr := commander.NewCommander(ctx, eventBus, llmClient, targetURL)
 	orch.RegisterAgent(cmdr)
 
-	// 5. Start System
+	// 5. Initialize Reporter Agent
+	reporterAgent := reporter.NewReporter(eventBus)
+	orch.RegisterAgent(reporterAgent)
+
+	// 6. Start System
 	orch.Start()
 
 	// 6. Wait for tasks to complete or user interrupt
@@ -70,7 +86,7 @@ func main() {
 	select {
 	case <-sigChan:
 		log.Println("User interrupt received")
-	case <-time.After(60 * time.Second):
+	case <-time.After(120 * time.Second):
 		log.Println("Timeout reached (60s)")
 	}
 

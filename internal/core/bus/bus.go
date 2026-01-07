@@ -13,6 +13,7 @@ type EventType string
 const (
 	TaskResult  EventType = "TASK_RESULT"
 	Observation EventType = "OBSERVATION"
+	Finding     EventType = "FINDING"
 	Error       EventType = "ERROR"
 	Command     EventType = "COMMAND"
 )

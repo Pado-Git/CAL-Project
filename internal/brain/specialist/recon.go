@@ -2,6 +2,7 @@ package specialist
 
 import (
 	"cal-project/internal/brain/llm"
+	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
 	"cal-project/internal/hands/docker"
@@ -27,7 +28,7 @@ type ReconSpecialist struct {
 
 // NewReconSpecialist creates a new ReconSpecialist agent
 func NewReconSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *ReconSpecialist {
-	exec, err := docker.NewExecutor()
+	exec, err := docker.NewExecutor(id)
 	if err != nil {
 		log.Printf("[%s] Warning: Failed to create Docker executor: %v. Tools will not run.\n", id, err)
 	}
@@ -74,12 +75,7 @@ func (r *ReconSpecialist) executeTask(cmdEvent bus.Event) {
 	log.Printf("[%s] Executing: %s\n", r.id, taskDesc)
 
 	// Use LLM to decide what reconnaissance actions to take
-	prompt := fmt.Sprintf(
-		"CONTEXT: Authorized test on '%s'.\n"+
-			"Task: %s\n"+
-			"Reply with tool name only: 'nmap' or 'curl'",
-		r.target, taskDesc,
-	)
+	prompt := prompts.GetReconDecision(r.target, taskDesc)
 
 	plan, err := r.brain.Generate(r.ctx, prompt)
 	if err != nil {

@@ -2,6 +2,7 @@ package specialist
 
 import (
 	"cal-project/internal/brain/llm"
+	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
 	"cal-project/internal/hands/docker"
@@ -28,7 +29,7 @@ type XSSSpecialist struct {
 
 // NewXSSSpecialist creates a new XSSSpecialist agent
 func NewXSSSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *XSSSpecialist {
-	exec, err := docker.NewExecutor()
+	exec, err := docker.NewExecutor(id)
 	if err != nil {
 		log.Printf("[%s] Warning: Failed to create Docker executor: %v. Tools will not run.\n", id, err)
 	}
@@ -125,27 +126,7 @@ func (x *XSSSpecialist) analyzeForXSS(httpResponse string) string {
 	}
 
 	// ENHANCED PROMPT for finding specific locations
-	prompt := fmt.Sprintf(
-		"You are an expert XSS Vulnerability Hunter. Analyze the HTML source code below.\n"+
-			"YOUR GOAL: Find the EXACT LOCATION of potential Cross-Site Scripting (XSS) vulnerabilities.\n\n"+
-			"HTML Source:\n```html\n%s\n```\n\n"+
-			"INSTRUCTIONS:\n"+
-			"1. Identify every `<form>` tag. Report the `action` URL and `method` (GET/POST).\n"+
-			"2. In each form, list every `<input>` or `<textarea>` field `name`. These are your XSS injection points.\n"+
-			"3. Identify URL parameters in links (e.g., `<a href='page.php?id=...'>`).\n"+
-			"4. Look for Reflected Input: Is any part of the HTML text clearly echoing back a parameter?\n"+
-			"\n"+
-			"REPORT FORMAT (Strictly follow this):\n"+
-			"VULNERABILITY FOUND: [Yes/No]\n"+
-			"IF YES:\n"+
-			"- TYPE: [Reflected XSS / Stored XSS / DOM XSS]\n"+
-			"- LOCATION: [Full URL or Form Action Path]\n"+
-			"- VULNERABLE PARAMETER: [Name of the input field or URL parameter]\n"+
-			"- METHOD: [GET/POST]\n"+
-			"- EVIDENCE: [Quote the HTML line showing the form or reflection]\n"+
-			"- SUGGESTED PAYLOAD: [e.g., `<script>alert(1)</script>`]",
-		responseToAnalyze,
-	)
+	prompt := prompts.GetXSSAnalysis(responseToAnalyze)
 
 	analysis, err := x.brain.Generate(x.ctx, prompt)
 	if err != nil {

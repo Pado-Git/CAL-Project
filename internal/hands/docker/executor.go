@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
@@ -13,28 +14,41 @@ import (
 
 // Executor runs commands in Docker containers
 type Executor struct {
-	client *client.Client
+	client  *client.Client
+	ownerID string
 }
 
 // NewExecutor creates a new Docker executor
-func NewExecutor() (*Executor, error) {
+func NewExecutor(ownerID string) (*Executor, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker client: %w", err)
 	}
 
-	return &Executor{client: cli}, nil
+	return &Executor{client: cli, ownerID: ownerID}, nil
 }
 
 // RunTool executes a tool in a Docker container
 // imageName: e.g., "cal/nmap:latest"
 // cmd: e.g., ["nmap", "-p", "80", "example.com"]
 func (e *Executor) RunTool(ctx context.Context, imageName string, cmd []string) (string, error) {
+	// Generate deterministic name
+	sanitizedImage := strings.ReplaceAll(imageName, "/", "-")
+	sanitizedImage = strings.ReplaceAll(sanitizedImage, ":", "-")
+	containerName := fmt.Sprintf("xbow-%s-%s", e.ownerID, sanitizedImage)
+
 	log.Printf("[Docker] Using local image: %s\n", imageName)
+	log.Printf("[Docker] Ensuring clean state for container: %s\n", containerName)
+
+	// Force remove any existing container with this name to prevent accumulation
+	// We ignore errors here as the container might not exist
+	_, _ = e.client.ContainerRemove(ctx, containerName, client.ContainerRemoveOptions{Force: true})
+
 	log.Printf("[Docker] Creating container with command: %v\n", cmd)
 
 	// Create container
 	resp, err := e.client.ContainerCreate(ctx, client.ContainerCreateOptions{
+		Name: containerName,
 		Config: &container.Config{
 			Image: imageName,
 			Cmd:   cmd,
@@ -95,6 +109,12 @@ func (e *Executor) RunTool(ctx context.Context, imageName string, cmd []string) 
 	// Docker adds 8-byte headers to each log line: [type][padding][padding][padding][size*4]
 	// Strip these headers to get clean output
 	result := stripDockerHeaders(logs)
+
+	// Check exit code after execution
+	inspect, err := e.client.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
+	if err == nil && inspect.Container.State.ExitCode != 0 {
+		return result, fmt.Errorf("container exited with code %d: %s", inspect.Container.State.ExitCode, result)
+	}
 
 	log.Printf("[Docker] Container finished. Output length: %d bytes\n", len(result))
 	return result, nil

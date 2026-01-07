@@ -2,6 +2,7 @@ package specialist
 
 import (
 	"cal-project/internal/brain/llm"
+	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
 	"cal-project/internal/hands/docker"
@@ -28,7 +29,7 @@ type SQLInjectionSpecialist struct {
 
 // NewSQLInjectionSpecialist creates a new SQLInjectionSpecialist agent
 func NewSQLInjectionSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *SQLInjectionSpecialist {
-	exec, err := docker.NewExecutor()
+	exec, err := docker.NewExecutor(id)
 	if err != nil {
 		log.Printf("[%s] Warning: Failed to create Docker executor: %v. Tools will not run.\n", id, err)
 	}
@@ -122,24 +123,7 @@ func (s *SQLInjectionSpecialist) analyzeForSQLi(httpResponse string) string {
 		responseToAnalyze = httpResponse[:4000]
 	}
 
-	prompt := fmt.Sprintf(
-		"You are an expert SQL Injection Hunter. Analyze the HTML source code below.\n"+
-			"YOUR GOAL: Find specific input fields that interact with the database.\n\n"+
-			"HTML Source:\n```html\n%s\n```\n\n"+
-			"INSTRUCTIONS:\n"+
-			"1. Identify forms that look like Search, Login, or Data entry (e.g., `<input name='query'>`, `<input name='id'>`).\n"+
-			"2. Identify URL parameters (e.g., `view.php?id=10`).\n"+
-			"3. Check for any Database Error messages exposed in the text.\n"+
-			"\n"+
-			"REPORT FORMAT (Strictly follow this):\n"+
-			"VULNERABILITY CANDIDATE FOUND: [Yes/No]\n"+
-			"IF YES:\n"+
-			"- LOCATION: [Full URL or Form Action Path]\n"+
-			"- VULNERABLE PARAMETER: [Name of input field]\n"+
-			"- REASONING: [Why do you think this interacts with DB?]\n"+
-			"- SUGGESTED TEST PAYLOAD: [e.g., `' OR '1'='1`]",
-		responseToAnalyze,
-	)
+	prompt := prompts.GetSQLiAnalysis(responseToAnalyze)
 
 	analysis, err := s.brain.Generate(s.ctx, prompt)
 	if err != nil {

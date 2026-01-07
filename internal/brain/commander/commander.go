@@ -2,6 +2,7 @@ package commander
 
 import (
 	"cal-project/internal/brain/llm"
+	"cal-project/internal/brain/prompts"
 	"cal-project/internal/brain/specialist"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
@@ -20,6 +21,7 @@ type Commander struct {
 	ctx         context.Context
 	target      string
 	specialists map[string]agent.Agent
+	counters    map[string]int
 	mu          sync.RWMutex
 }
 
@@ -32,6 +34,7 @@ func NewCommander(ctx context.Context, eventBus bus.Bus, llmClient llm.LLM, targ
 		ctx:         ctx,
 		target:      targetURL,
 		specialists: make(map[string]agent.Agent),
+		counters:    make(map[string]int),
 	}
 }
 
@@ -47,12 +50,7 @@ func (c *Commander) Run() error {
 	log.Printf("[%s] Online. Target: %s\n", c.id, c.target)
 
 	// Initial thought with authorized testing context
-	initialPrompt := fmt.Sprintf(
-		"CONTEXT: Authorized security test on controlled environment '%s'.\n\n"+
-			"TASK: Start security assessment.\n"+
-			"Reply in 1-2 sentences: Which specialists should be spawned? (e.g., 'Spawn reconnaissance and web specialists')",
-		c.target,
-	)
+	initialPrompt := prompts.GetCommanderInitial(c.target)
 	go c.think(initialPrompt)
 
 	return nil
@@ -99,17 +97,7 @@ func (c *Commander) OnEvent(event bus.Event) {
 }
 
 func (c *Commander) analyzeObservation(fromAgent string, observation string) {
-	prompt := fmt.Sprintf(
-		"CONTEXT: You are analyzing security reconnaissance results from %s.\n"+
-			"Target: %s\n\n"+
-			"OBSERVATION:\n%s\n\n"+
-			"TASK: Analyze this output and identify:\n"+
-			"1. Any potential vulnerabilities (SQL injection points, XSS, exposed secrets, etc.)\n"+
-			"2. Interesting findings (open ports, technologies detected, security headers missing)\n"+
-			"3. Recommended next steps for deeper investigation\n\n"+
-			"Provide a concise analysis in 2-3 sentences.",
-		fromAgent, c.target, observation,
-	)
+	prompt := prompts.GetCommanderAnalyze(fromAgent, c.target, observation)
 
 	analysis, err := c.brain.Generate(c.ctx, prompt)
 	if err != nil {
@@ -139,17 +127,18 @@ func (c *Commander) think(prompt string) {
 
 	log.Printf("[%s] Thought: %s\n", c.id, resp)
 
-	// TODO: Parse response and decide actions
-	// Spawn appropriate specialists based on LLM response
-	if c.shouldSpawnReconSpecialist(resp) {
-		c.spawnReconSpecialist()
-	}
+	log.Printf("[%s] Thought: %s\n", c.id, resp)
 
-	// If web reconnaissance is needed, spawn specific vulnerability specialists
-	if c.shouldSpawnWebSpecialist(resp) {
-		// Spawn both XSS and SQLi specialists for comprehensive coverage
-		c.spawnXSSSpecialist()
-		c.spawnSQLiSpecialist()
+	// Always spawn Recon Specialist to start
+	c.spawnReconSpecialist()
+
+	// If target is HTTP/HTTPS, automatically spawn Web Specialists
+	if strings.HasPrefix(c.target, "http") || c.shouldSpawnWebSpecialist(resp) {
+		log.Printf("[%s] Target is web-based or requested: Spawning Web Specialists\n", c.id)
+		c.spawnWebSpecialist()           // Coordinator
+		c.spawnXSSSpecialist()           // Worker
+		c.spawnSQLiSpecialist()          // Worker
+		c.spawnPathTraversalSpecialist() // Worker
 	}
 }
 
@@ -180,6 +169,7 @@ func (c *Commander) shouldSpawnWebSpecialist(response string) bool {
 	keywords := []string{
 		"web", "http", "https", "curl", "webpage", "website",
 		"header", "response", "request", "url",
+		"path", "traversal", "file", "directory",
 	}
 
 	for _, kw := range keywords {
@@ -271,10 +261,15 @@ func (c *Commander) spawnVerificationSpecialist(vulnReport string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if we already have a verification specialist
-	verifyID := "VerifyAgent-01"
+	// Generate unique ID for parallel verification
+	c.counters["VerifyAgent"]++
+	count := c.counters["VerifyAgent"]
+	verifyID := fmt.Sprintf("VerifyAgent-%02d", count)
+
+	// Previously we checked for existence, now we allow parallels
+	// But valid to check if SPECIFIC ID exists (unlikely with counter)
 	if _, exists := c.specialists[verifyID]; exists {
-		log.Printf("[%s] VerificationSpecialist already exists, sending task instead\n", c.id)
+		log.Printf("[%s] %s already exists, sending task\n", c.id, verifyID)
 		c.sendTaskToSpecialist(verifyID, vulnReport)
 		return
 	}
@@ -336,7 +331,11 @@ func (c *Commander) spawnXSSSpecialist() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	xssID := "XSSAgent-01"
+	// Generate unique ID
+	c.counters["XSSAgent"]++
+	count := c.counters["XSSAgent"]
+	xssID := fmt.Sprintf("XSSAgent-%02d", count)
+
 	if _, exists := c.specialists[xssID]; exists {
 		return
 	}
@@ -365,7 +364,11 @@ func (c *Commander) spawnSQLiSpecialist() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	sqliID := "SQLiAgent-01"
+	// Generate unique ID
+	c.counters["SQLiAgent"]++
+	count := c.counters["SQLiAgent"]
+	sqliID := fmt.Sprintf("SQLiAgent-%02d", count)
+
 	if _, exists := c.specialists[sqliID]; exists {
 		return
 	}
@@ -387,4 +390,37 @@ func (c *Commander) spawnSQLiSpecialist() {
 	}()
 
 	c.sendTaskToSpecialist(sqliID, "Hunt for SQL injection on "+c.target)
+}
+
+// spawnPathTraversalSpecialist creates and registers Path Traversal specialist
+func (c *Commander) spawnPathTraversalSpecialist() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Generate unique ID
+	c.counters["PathTraversalAgent"]++
+	count := c.counters["PathTraversalAgent"]
+	ptID := fmt.Sprintf("PathTraversalAgent-%02d", count)
+
+	if _, exists := c.specialists[ptID]; exists {
+		return
+	}
+
+	log.Printf("[%s] Spawning PathTraversalSpecialist...\n", c.id)
+	ptAgent := specialist.NewPathTraversalSpecialist(c.ctx, ptID, c.bus, c.brain, c.target)
+	c.specialists[ptID] = ptAgent
+
+	c.bus.Subscribe(ptID, func(e bus.Event) {
+		ptAgent.OnEvent(e)
+	})
+
+	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, ptID)
+
+	go func() {
+		if err := ptAgent.Run(); err != nil {
+			log.Printf("[%s] PathTraversalSpecialist crashed: %v\n", c.id, err)
+		}
+	}()
+
+	c.sendTaskToSpecialist(ptID, "Hunt for Path Traversal vulnerabilities on "+c.target)
 }

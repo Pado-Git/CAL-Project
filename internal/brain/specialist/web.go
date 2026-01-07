@@ -28,7 +28,7 @@ type WebSpecialist struct {
 
 // NewWebSpecialist creates a new WebSpecialist agent
 func NewWebSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *WebSpecialist {
-	exec, err := docker.NewExecutor()
+	exec, err := docker.NewExecutor(id)
 	if err != nil {
 		log.Printf("[%s] Warning: Failed to create Docker executor: %v. Tools will not run.\n", id, err)
 	}
