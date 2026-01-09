@@ -90,9 +90,10 @@ const (
 		"   - XSS: User input reflected in HTML without sanitization\n" +
 		"   - SQLi: Input likely used in database queries (search, login, id params)\n" +
 		"   - PathTraversal: File path parameters (file=, page=, doc=)\n" +
-		"   - CommandInjection: System command execution (ping, lookup, etc.)\n\n" +
+		"   - CommandInjection: System command execution (ping, lookup, etc.)\n" +
+		"   - FileUpload: File upload forms (input type=\"file\") without proper validation\n\n" +
 		"OUTPUT FORMAT (JSON only, no markdown):\n" +
-		"{\"vulnerabilities\": [{\"type\": \"XSS|SQLi|PathTraversal|CommandInjection\", \"location\": \"form action or URL\", \"parameter\": \"input name or URL param\", \"confidence\": \"high|medium|low\", \"reason\": \"brief explanation\"}]}\n\n" +
+		"{\"vulnerabilities\": [{\"type\": \"XSS|SQLi|PathTraversal|CommandInjection|FileUpload\", \"location\": \"form action or URL\", \"parameter\": \"input name or URL param\", \"confidence\": \"high|medium|low\", \"reason\": \"brief explanation\"}]}\n\n" +
 		"If no vulnerabilities found, return: {\"vulnerabilities\": []}"
 
 	DefaultCommandInjectionAnalysis = "You are an expert OS Command Injection Hunter. Analyze the HTML source code below.\n" +
@@ -118,6 +119,78 @@ const (
 		"Command Output:\n%s\n\n" +
 		"TASK: Identify if this is Windows or Linux based on the output.\n" +
 		"Reply with JSON ONLY: {\"platform\": \"windows\"|\"linux\", \"confidence\": \"high\"|\"medium\"|\"low\", \"evidence\": \"brief explanation\"}"
+
+	DefaultFileUploadAnalysis = "You are an expert File Upload Vulnerability Hunter. Analyze the HTML source code below.\n" +
+		"YOUR GOAL: Find input fields that allow file uploads and assess their security.\n\n" +
+		"HTML Source:\n```html\n%s\n```\n\n" +
+		"INSTRUCTIONS:\n" +
+		"1. Identify all `<input type=\"file\">` elements and their containing forms.\n" +
+		"2. Look for upload-related endpoints:\n" +
+		"   - Common patterns: act/write.php, act/upload.php, /upload, /upload.php, /files/upload\n" +
+		"   - Board/forum uploads: write.php, post.php, submit.php\n" +
+		"3. Check for file storage hints:\n" +
+		"   - Upload directories: /uploads/, /files/, /attachments/, /data/\n" +
+		"   - Image paths in HTML that reveal storage location\n" +
+		"4. Look for form parameters that suggest file board/gallery:\n" +
+		"   - type=freeboard, type=pds, board_type, category\n" +
+		"   - title, contents, subject fields alongside file input\n" +
+		"5. Check client-side validation (accept attribute, JavaScript).\n\n" +
+		"COMMON VULNERABLE PATTERNS:\n" +
+		"- PHP bulletin board systems often use 'act/write.php' for uploads\n" +
+		"- Files typically stored in '/uploads/' directory\n" +
+		"- Lack of extension validation allows .php file upload\n\n" +
+		"REPORT FORMAT (Strictly follow this):\n" +
+		"VULNERABILITY CANDIDATE FOUND: [Yes/No]\n" +
+		"IF YES:\n" +
+		"- LOCATION: [Full URL or Form Action Path]\n" +
+		"- FILE INPUT NAME: [Name attribute of the file input, e.g., 'upload']\n" +
+		"- UPLOAD ENDPOINT: [Where form submits, e.g., 'act/write.php']\n" +
+		"- CLIENT-SIDE VALIDATION: [Yes/No - describe any accept attributes or JS validation]\n" +
+		"- POTENTIAL UPLOAD PATH: [e.g., '/uploads/' if visible in HTML]\n" +
+		"- REASONING: [Why this might be vulnerable - e.g., no extension check, board upload functionality]\n" +
+		"- SUGGESTED TEST: [Upload PHP web shell as 'webshell.php' to test execution in /uploads/ directory]"
+
+	DefaultCrawlAnalysis = "You are a web crawler. Extract all links from the HTML below.\n\n" +
+		"HTML Content:\n%s\n\n" +
+		"Base URL: %s\n\n" +
+		"INSTRUCTIONS:\n" +
+		"1. Find all <a href=\"...\"> links\n" +
+		"2. Find all <form action=\"...\"> endpoints\n" +
+		"3. Find JavaScript redirects in <script> tags:\n" +
+		"   - window.location.href=\"...\"\n" +
+		"   - window.location=\"...\"\n" +
+		"   - location.href=\"...\"\n" +
+		"   - location=\"...\"\n" +
+		"4. Find onclick event handlers with navigation:\n" +
+		"   - onclick=\"window.location.href='...'\"\n" +
+		"   - onclick=\"location.href='...'\"\n" +
+		"   - onclick=\"window.location='...'\"\n" +
+		"   - onclick=\"location='...'\"\n" +
+		"   EXAMPLE: <button onclick=\"window.location.href='?p=write.php&t=freeboard';\">write</button>\n" +
+		"   → Extract: ?p=write.php&t=freeboard\n" +
+		"5. Convert relative URLs to absolute URLs using the Base URL\n\n" +
+		"OUTPUT FORMAT (JSON only, no markdown, no code blocks):\n" +
+		"{\"links\": [\"http://example.com/page1\", \"http://example.com/page2\"]}\n\n" +
+		"CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks."
+
+	DefaultLoginFormAnalysis = "You are a login form analyzer. Extract login form details.\n\n" +
+		"HTML Content:\n%s\n\n" +
+		"INSTRUCTIONS:\n" +
+		"1. Find <form> with <input type=\"password\">\n" +
+		"2. Extract form's action attribute\n" +
+		"3. Extract method (GET/POST)\n" +
+		"4. Extract EXACT field names from HTML:\n" +
+		"   - Find the <input> for username/email (look for name=\"email\" or name=\"username\")\n" +
+		"   - Find the <input type=\"password\"> (look for name=\"password\" or name=\"pass\")\n" +
+		"5. Return the ACTUAL field names from the HTML, not mapped names\n\n" +
+		"EXAMPLES:\n" +
+		"If HTML has: <input name=\"email\"> and <input name=\"password\" type=\"password\">\n" +
+		"Return: {\"action\": \"/login\", \"method\": \"POST\", \"username_field\": \"email\", \"password_field\": \"password\"}\n\n" +
+		"If HTML has: <input name=\"user\"> and <input name=\"pass\" type=\"password\">\n" +
+		"Return: {\"action\": \"/login\", \"method\": \"POST\", \"username_field\": \"user\", \"password_field\": \"pass\"}\n\n" +
+		"OUTPUT FORMAT (JSON only, no markdown, no code blocks):\n" +
+		"{\"action\": \"/login\", \"method\": \"POST\", \"username_field\": \"actual_name_from_html\", \"password_field\": \"actual_name_from_html\"}\n\n" +
+		"CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks."
 )
 
 // Helper to get env var or default
@@ -203,4 +276,22 @@ func GetCommandInjectionAnalysis(htmlSource string) string {
 func GetPlatformDetection(cmdOutput string) string {
 	format := getEnvOrDefault("PROMPT_PLATFORM_DETECTION", DefaultPlatformDetection)
 	return fmt.Sprintf(format, cmdOutput)
+}
+
+// GetFileUploadAnalysis returns the prompt for File Upload vulnerability analysis
+func GetFileUploadAnalysis(htmlSource string) string {
+	format := getEnvOrDefault("PROMPT_FILEUPLOAD_ANALYSIS", DefaultFileUploadAnalysis)
+	return fmt.Sprintf(format, htmlSource)
+}
+
+// GetCrawlAnalysis returns the prompt for web crawling and link extraction
+func GetCrawlAnalysis(htmlContent string, baseURL string) string {
+	format := getEnvOrDefault("PROMPT_CRAWL_ANALYSIS", DefaultCrawlAnalysis)
+	return fmt.Sprintf(format, htmlContent, baseURL)
+}
+
+// GetLoginFormAnalysis returns the prompt for login form detection and analysis
+func GetLoginFormAnalysis(htmlContent string) string {
+	format := getEnvOrDefault("PROMPT_LOGIN_FORM_ANALYSIS", DefaultLoginFormAnalysis)
+	return fmt.Sprintf(format, htmlContent)
 }

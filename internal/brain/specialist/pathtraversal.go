@@ -5,13 +5,16 @@ import (
 	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
+	"cal-project/internal/core/reporter"
 	"cal-project/internal/hands/tools"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 var ptMessageCounter atomic.Uint64
@@ -91,6 +94,9 @@ func (p *PathTraversalSpecialist) executeTask(cmdEvent bus.Event) {
 
 	log.Printf("[%s] Path Traversal analysis complete\n", p.id)
 
+	// Report candidate to Reporter if found
+	p.reportCandidateIfFound(analysis)
+
 	// Generate report
 	report := p.generateReport(httpOutput, analysis)
 
@@ -136,6 +142,64 @@ func (p *PathTraversalSpecialist) generateReport(httpResponse string, analysis s
 	report += analysis + "\n"
 
 	return report
+}
+
+// reportCandidateIfFound parses LLM analysis and reports vulnerability candidate to Reporter
+func (p *PathTraversalSpecialist) reportCandidateIfFound(analysis string) {
+	// Check if vulnerability was found
+	if !strings.Contains(analysis, "VULNERABILITY CANDIDATE FOUND: Yes") {
+		return
+	}
+
+	// Extract details from the analysis
+	var location, parameter, reasoning string
+
+	lines := strings.Split(analysis, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- LOCATION:") {
+			location = strings.TrimSpace(strings.TrimPrefix(line, "- LOCATION:"))
+		} else if strings.HasPrefix(line, "- VULNERABLE PARAMETER:") {
+			parameter = strings.TrimSpace(strings.TrimPrefix(line, "- VULNERABLE PARAMETER:"))
+		} else if strings.HasPrefix(line, "- REASONING:") {
+			reasoning = strings.TrimSpace(strings.TrimPrefix(line, "- REASONING:"))
+		}
+	}
+
+	// Build full URL if location is relative
+	fullURL := p.target
+	if location != "" && !strings.HasPrefix(location, "http") {
+		if strings.HasPrefix(location, "/") {
+			// Parse base URL
+			if parsedURL, err := url.Parse(p.target); err == nil {
+				fullURL = fmt.Sprintf("%s://%s%s", parsedURL.Scheme, parsedURL.Host, location)
+			}
+		}
+	} else if location != "" {
+		fullURL = location
+	}
+
+	// Create candidate
+	candidate := reporter.VulnerabilityCandidate{
+		Type:      "PathTraversal",
+		URL:       fullURL,
+		Parameter: parameter,
+		Evidence:  analysis,
+		Reasoning: reasoning,
+		Timestamp: time.Now().Format(time.RFC1123),
+		Status:    "pending",
+	}
+
+	// Send to Reporter
+	candidateJSON, _ := json.Marshal(candidate)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-candidate-%d", p.id, ptMessageCounter.Add(1)),
+		FromAgent: p.id,
+		ToAgent:   "Reporter-01",
+		Type:      bus.Candidate,
+		Payload:   string(candidateJSON),
+	}
+	p.bus.Publish("Reporter-01", event)
 }
 
 func (p *PathTraversalSpecialist) reportObservation(toAgent string, observation string) {

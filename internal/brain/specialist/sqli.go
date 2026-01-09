@@ -5,13 +5,16 @@ import (
 	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
+	"cal-project/internal/core/reporter"
 	"cal-project/internal/hands/tools"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 var sqliMessageCounter atomic.Uint64
@@ -91,6 +94,9 @@ func (s *SQLInjectionSpecialist) executeTask(cmdEvent bus.Event) {
 
 	log.Printf("[%s] SQLi analysis complete\n", s.id)
 
+	// Report candidate to Reporter if found
+	s.reportCandidateIfFound(analysis)
+
 	// Generate report
 	report := s.generateReport(httpOutput, analysis)
 
@@ -137,6 +143,64 @@ func (s *SQLInjectionSpecialist) generateReport(httpResponse string, analysis st
 	report += analysis + "\n"
 
 	return report
+}
+
+// reportCandidateIfFound parses LLM analysis and reports vulnerability candidate to Reporter
+func (s *SQLInjectionSpecialist) reportCandidateIfFound(analysis string) {
+	// Check if vulnerability was found
+	if !strings.Contains(analysis, "VULNERABILITY CANDIDATE FOUND: Yes") {
+		return
+	}
+
+	// Extract details from the analysis
+	var location, parameter, reasoning string
+
+	lines := strings.Split(analysis, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "- LOCATION:") {
+			location = strings.TrimSpace(strings.TrimPrefix(line, "- LOCATION:"))
+		} else if strings.HasPrefix(line, "- VULNERABLE PARAMETER:") {
+			parameter = strings.TrimSpace(strings.TrimPrefix(line, "- VULNERABLE PARAMETER:"))
+		} else if strings.HasPrefix(line, "- REASONING:") {
+			reasoning = strings.TrimSpace(strings.TrimPrefix(line, "- REASONING:"))
+		}
+	}
+
+	// Build full URL if location is relative
+	fullURL := s.target
+	if location != "" && !strings.HasPrefix(location, "http") {
+		if strings.HasPrefix(location, "/") {
+			// Parse base URL
+			if parsedURL, err := url.Parse(s.target); err == nil {
+				fullURL = fmt.Sprintf("%s://%s%s", parsedURL.Scheme, parsedURL.Host, location)
+			}
+		}
+	} else if location != "" {
+		fullURL = location
+	}
+
+	// Create candidate
+	candidate := reporter.VulnerabilityCandidate{
+		Type:      "SQLi",
+		URL:       fullURL,
+		Parameter: parameter,
+		Evidence:  analysis,
+		Reasoning: reasoning,
+		Timestamp: time.Now().Format(time.RFC1123),
+		Status:    "pending",
+	}
+
+	// Send to Reporter
+	candidateJSON, _ := json.Marshal(candidate)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-candidate-%d", s.id, sqliMessageCounter.Add(1)),
+		FromAgent: s.id,
+		ToAgent:   "Reporter-01",
+		Type:      bus.Candidate,
+		Payload:   string(candidateJSON),
+	}
+	s.bus.Publish("Reporter-01", event)
 }
 
 func (s *SQLInjectionSpecialist) reportObservation(toAgent string, observation string) {

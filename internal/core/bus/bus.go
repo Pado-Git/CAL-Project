@@ -14,6 +14,7 @@ const (
 	TaskResult  EventType = "TASK_RESULT"
 	Observation EventType = "OBSERVATION"
 	Finding     EventType = "FINDING"
+	Candidate   EventType = "CANDIDATE"
 	Error       EventType = "ERROR"
 	Command     EventType = "COMMAND"
 	Engagement  EventType = "ENGAGEMENT"

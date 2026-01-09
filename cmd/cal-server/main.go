@@ -91,8 +91,8 @@ func main() {
 	select {
 	case <-sigChan:
 		log.Println("User interrupt received")
-	case <-time.After(120 * time.Second):
-		log.Println("Timeout reached (120s)")
+	case <-time.After(300 * time.Second):
+		log.Println("Timeout reached (300s)")
 	}
 
 	orch.Stop()

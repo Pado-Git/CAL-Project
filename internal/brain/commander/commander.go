@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -34,15 +36,17 @@ type VulnerabilityCandidate struct {
 
 // Commander is the strategic leader agent
 type Commander struct {
-	id          string
-	bus         bus.Bus
-	brain       llm.LLM
-	ctx         context.Context
-	target      string
-	trtClient   *trt.Client
-	specialists map[string]agent.Agent
-	counters    map[string]int
-	mu          sync.RWMutex
+	id            string
+	bus           bus.Bus
+	brain         llm.LLM
+	ctx           context.Context
+	target        string
+	trtClient     *trt.Client
+	specialists   map[string]agent.Agent
+	counters      map[string]int
+	sessionCookie string          // Session cookie for authenticated requests
+	crawledURLs   map[string]bool // Base URLs that have been crawled
+	mu            sync.RWMutex
 }
 
 // NewCommander creates a new Commander agent
@@ -56,6 +60,7 @@ func NewCommander(ctx context.Context, eventBus bus.Bus, llmClient llm.LLM, targ
 		trtClient:   trtClient,
 		specialists: make(map[string]agent.Agent),
 		counters:    make(map[string]int),
+		crawledURLs: make(map[string]bool),
 	}
 }
 
@@ -151,11 +156,53 @@ func (c *Commander) analyzeObservation(fromAgent string, observation string) {
 		return
 	}
 
+	// Check for session cookie from LoginSpecialist
+	if strings.Contains(observation, "SESSION_COOKIE_START") {
+		c.handleSessionCookie(observation)
+		return
+	}
+
+	// Check for crawler results
+	if strings.Contains(observation, "CRAWLER_JSON_START") {
+		c.handleCrawlerResults(observation)
+		return
+	}
+
+	// Check for login form detection
+	if strings.Contains(observation, "LOGIN_FORM_FOUND:") {
+		loginURL := c.extractLoginURL(observation)
+		if loginURL != "" {
+			log.Printf("[%s] 🔐 Login form detected, spawning LoginSpecialist\n", c.id)
+			credentials := map[string]string{
+				"email":    "test@test.net",
+				"password": "1234",
+			}
+			go c.spawnLoginSpecialist(loginURL, credentials)
+		}
+		return
+	}
+
+	// Second, check if observation contains nmap scan results - parse directly without LLM
+	if strings.Contains(observation, "Nmap scan report for") {
+		httpHosts := c.parseNmapForHTTPPorts(observation)
+		for _, host := range httpHosts {
+			targetURL := fmt.Sprintf("http://%s", host)
+			log.Printf("[%s] 🚀 Auto-spawning WebSpecialist for discovered HTTP host: %s\n", c.id, host)
+			go c.spawnWebSpecialist(targetURL)
+		}
+
+		// If we found HTTP hosts, we can skip LLM analysis (already handled)
+		if len(httpHosts) > 0 {
+			return
+		}
+	}
+
+	// Third, use LLM analysis as fallback
 	prompt := prompts.GetCommanderAnalyze(fromAgent, c.target, observation)
 
 	analysis, err := c.brain.Generate(c.ctx, prompt)
 	if err != nil {
-		log.Printf("[%s] Failed to analyze observation: %v\n", c.id, err)
+		log.Printf("[%s] ⚠️ LLM analysis failed: %v (continuing with rule-based logic)\n", c.id, err)
 		return
 	}
 
@@ -207,15 +254,28 @@ func (c *Commander) parseVulnerabilityJSON(fromAgent string, observation string)
 		return
 	}
 
+	// Extract base URL from the report's target (need to get it from WebSpecialist's observation)
+	baseURL := c.extractBaseURL(observation)
+
+	// Auto-spawn CrawlerSpecialist to discover all pages (check for duplicates)
+	c.mu.Lock()
+	alreadyCrawled := c.crawledURLs[baseURL]
+	if !alreadyCrawled {
+		c.crawledURLs[baseURL] = true
+		c.mu.Unlock()
+		log.Printf("[%s] 🕷️ Auto-spawning CrawlerSpecialist for: %s\n", c.id, baseURL)
+		go c.spawnCrawlerSpecialist(baseURL)
+	} else {
+		c.mu.Unlock()
+		log.Printf("[%s] ⏭️ Skipping duplicate crawl for: %s\n", c.id, baseURL)
+	}
+
 	if len(report.Vulnerabilities) == 0 {
 		log.Printf("[%s] No vulnerabilities found by %s\n", c.id, fromAgent)
 		return
 	}
 
 	log.Printf("[%s] 🎯 Found %d vulnerability candidates from %s\n", c.id, len(report.Vulnerabilities), fromAgent)
-
-	// Extract base URL from the report's target (need to get it from WebSpecialist's observation)
-	baseURL := c.extractBaseURL(observation)
 
 	// Spawn appropriate specialists based on vulnerability types
 	for _, vuln := range report.Vulnerabilities {
@@ -240,6 +300,10 @@ func (c *Commander) parseVulnerabilityJSON(fromAgent string, observation string)
 		case "COMMANDINJECTION":
 			log.Printf("[%s] ⚡ Spawning CommandInjectionSpecialist for: %s (param: %s)\n", c.id, targetURL, vuln.Parameter)
 			go c.spawnCommandInjectionSpecialist(targetURL, vuln.Parameter)
+
+		case "FILEUPLOAD":
+			log.Printf("[%s] 📤 Spawning FileUploadSpecialist for: %s (param: %s)\n", c.id, targetURL, vuln.Parameter)
+			go c.spawnFileUploadSpecialist(targetURL)
 
 		default:
 			log.Printf("[%s] Unknown vulnerability type: %s\n", c.id, vuln.Type)
@@ -372,11 +436,13 @@ func (c *Commander) spawnReconSpecialist() {
 	// Determine Executor
 	var executor tools.ToolExecutor
 	var err error
+	var agentPaw string
 
 	if c.trtClient != nil {
 		agents, trtErr := c.trtClient.GetAliveAgents()
 		if trtErr == nil && len(agents) > 0 {
 			agent := agents[0]
+			agentPaw = agent.Paw
 			log.Printf("[%s] Using TRT Agent %s (%s) for ReconSpecialist\n", c.id, agent.Paw, agent.Platform)
 			executor = trt.NewRemoteExecutor(c.trtClient, agent.Paw, agent.Platform)
 		}
@@ -392,7 +458,7 @@ func (c *Commander) spawnReconSpecialist() {
 
 	// Create new specialist
 	log.Printf("[%s] Spawning ReconSpecialist...\n", c.id)
-	reconAgent := specialist.NewReconSpecialist(c.ctx, reconID, c.bus, c.brain, c.target, executor)
+	reconAgent := specialist.NewReconSpecialist(c.ctx, reconID, c.bus, c.brain, c.target, executor, c.trtClient, agentPaw)
 
 	// Register specialist
 	c.specialists[reconID] = reconAgent
@@ -673,6 +739,40 @@ func (c *Commander) spawnPathTraversalSpecialist(targetURL string) {
 	c.sendTaskToSpecialist(ptID, "Hunt for Path Traversal vulnerabilities on "+targetURL)
 }
 
+// spawnFileUploadSpecialist creates and registers File Upload specialist
+func (c *Commander) spawnFileUploadSpecialist(targetURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Generate unique ID
+	c.counters["FileUploadAgent"]++
+	count := c.counters["FileUploadAgent"]
+	fuID := fmt.Sprintf("FileUploadAgent-%02d", count)
+
+	if _, exists := c.specialists[fuID]; exists {
+		return
+	}
+
+	executor, _ := c.selectExecutor(fuID)
+	log.Printf("[%s] Spawning FileUploadSpecialist for %s...\n", c.id, targetURL)
+	fuAgent := specialist.NewFileUploadSpecialist(c.ctx, fuID, c.bus, c.brain, targetURL, executor)
+	c.specialists[fuID] = fuAgent
+
+	c.bus.Subscribe(fuID, func(e bus.Event) {
+		fuAgent.OnEvent(e)
+	})
+
+	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, fuID)
+
+	go func() {
+		if err := fuAgent.Run(); err != nil {
+			log.Printf("[%s] FileUploadSpecialist crashed: %v\n", c.id, err)
+		}
+	}()
+
+	c.sendTaskToSpecialist(fuID, "Hunt for File Upload vulnerabilities on "+targetURL)
+}
+
 // Helper: Select Executor
 func (c *Commander) selectExecutor(agentID string) (tools.ToolExecutor, error) {
 	var executor tools.ToolExecutor
@@ -784,4 +884,208 @@ func (c *Commander) spawnAgentDeploymentSpecialist(agentPaw string, platform str
 	}()
 
 	c.sendTaskToSpecialist(cmdiID, fmt.Sprintf("Deploy CallistoAgent via agent %s", agentPaw))
+}
+
+// parseNmapForHTTPPorts parses nmap output and extracts hosts with HTTP ports
+func (c *Commander) parseNmapForHTTPPorts(nmapOutput string) []string {
+	var httpHosts []string
+
+	// Regular expression patterns
+	// Match: "Nmap scan report for 192.168.127.128"
+	hostPattern := regexp.MustCompile(`Nmap scan report for ([\d\.]+)`)
+	// Match: "80/tcp   open  http" or "443/tcp   open  https"
+	portPattern := regexp.MustCompile(`(?m)^(80|443|8080|8443)/tcp\s+open`)
+
+	// Split by host sections
+	hostSections := strings.Split(nmapOutput, "Nmap scan report for")
+
+	for _, section := range hostSections[1:] { // Skip first empty split
+		// Extract IP
+		hostMatch := hostPattern.FindStringSubmatch("Nmap scan report for" + section)
+		if len(hostMatch) < 2 {
+			continue
+		}
+		ip := hostMatch[1]
+
+		// Check for HTTP ports
+		if portPattern.MatchString(section) {
+			httpHosts = append(httpHosts, ip)
+			log.Printf("[%s] 🌐 Detected HTTP service on: %s\n", c.id, ip)
+		}
+	}
+
+	return httpHosts
+}
+
+// handleSessionCookie processes session cookie from LoginSpecialist
+func (c *Commander) handleSessionCookie(observation string) {
+	// Extract content between markers
+	startMarker := "SESSION_COOKIE_START"
+	endMarker := "SESSION_COOKIE_END"
+
+	startIdx := strings.Index(observation, startMarker)
+	endIdx := strings.Index(observation, endMarker)
+
+	if startIdx == -1 || endIdx == -1 || endIdx <= startIdx {
+		log.Printf("[%s] Failed to find session cookie markers\n", c.id)
+		return
+	}
+
+	content := strings.TrimSpace(observation[startIdx+len(startMarker) : endIdx])
+
+	// Parse url and cookie from content
+	// Format: "url: http://...\ncookie: PHPSESSID=..."
+	var baseURL, cookie string
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "url:") {
+			baseURL = strings.TrimSpace(strings.TrimPrefix(line, "url:"))
+		} else if strings.HasPrefix(line, "cookie:") {
+			cookie = strings.TrimSpace(strings.TrimPrefix(line, "cookie:"))
+		}
+	}
+
+	if cookie == "" {
+		log.Printf("[%s] No cookie found in session cookie event\n", c.id)
+		return
+	}
+
+	c.mu.Lock()
+	c.sessionCookie = cookie
+	c.mu.Unlock()
+
+	// Mask cookie for logging
+	maskedCookie := cookie
+	if len(cookie) > 20 {
+		maskedCookie = cookie[:10] + "***" + cookie[len(cookie)-5:]
+	}
+
+	log.Printf("[%s] 🍪 Session Cookie Acquired: %s\n", c.id, maskedCookie)
+
+	// Re-crawl the target with authentication to discover authenticated pages
+	if baseURL == "" {
+		log.Printf("[%s] ⚠️ No base URL provided in session cookie event, skipping re-crawl\n", c.id)
+		return
+	}
+
+	log.Printf("[%s] 🔄 Re-spawning CrawlerSpecialist with authentication for: %s\n", c.id, baseURL)
+	go c.spawnCrawlerSpecialist(baseURL)
+}
+
+// getBaseURLFromLogin extracts base URL from login URL
+func (c *Commander) getBaseURLFromLogin(loginURL string) string {
+	// If login URL is like http://example.com/login.php
+	// return http://example.com
+	if parsedURL, err := url.Parse(c.target); err == nil {
+		return fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+	}
+	return c.target
+}
+
+// handleCrawlerResults processes discovered URLs from CrawlerSpecialist
+func (c *Commander) handleCrawlerResults(observation string) {
+	// Extract JSON between markers
+	startMarker := "CRAWLER_JSON_START"
+	endMarker := "CRAWLER_JSON_END"
+
+	startIdx := strings.Index(observation, startMarker)
+	endIdx := strings.Index(observation, endMarker)
+
+	if startIdx == -1 || endIdx == -1 || endIdx <= startIdx {
+		log.Printf("[%s] Failed to find crawler JSON markers\n", c.id)
+		return
+	}
+
+	jsonStr := strings.TrimSpace(observation[startIdx+len(startMarker) : endIdx])
+
+	var result struct {
+		DiscoveredURLs []string `json:"discovered_urls"`
+		TotalCount     int      `json:"total_count"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		log.Printf("[%s] Failed to parse crawler JSON: %v\n", c.id, err)
+		return
+	}
+
+	log.Printf("[%s] 📋 Crawler discovered %d URLs\n", c.id, result.TotalCount)
+
+	// Spawn WebSpecialist for each discovered URL
+	for _, url := range result.DiscoveredURLs {
+		log.Printf("[%s] 🔍 Analyzing discovered URL: %s\n", c.id, url)
+		go c.spawnWebSpecialist(url)
+	}
+}
+
+// extractLoginURL extracts URL from LOGIN_FORM_FOUND message
+func (c *Commander) extractLoginURL(observation string) string {
+	// Format: "LOGIN_FORM_FOUND: http://..."
+	parts := strings.SplitN(observation, "LOGIN_FORM_FOUND:", 2)
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+// spawnCrawlerSpecialist creates and registers a new CrawlerSpecialist
+func (c *Commander) spawnCrawlerSpecialist(baseURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.counters["CrawlerAgent"]++
+	count := c.counters["CrawlerAgent"]
+	crawlerID := fmt.Sprintf("CrawlerAgent-%02d", count)
+
+	executor, _ := c.selectExecutor(crawlerID)
+
+	log.Printf("[%s] Spawning CrawlerSpecialist for %s...\n", c.id, baseURL)
+	crawlerAgent := specialist.NewCrawlerSpecialist(c.ctx, crawlerID, c.bus, c.brain, baseURL, executor, c.sessionCookie)
+
+	c.specialists[crawlerID] = crawlerAgent
+
+	c.bus.Subscribe(crawlerID, func(e bus.Event) {
+		crawlerAgent.OnEvent(e)
+	})
+
+	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, crawlerID)
+
+	go func() {
+		if err := crawlerAgent.Run(); err != nil {
+			log.Printf("[%s] CrawlerSpecialist crashed: %v\n", c.id, err)
+		}
+	}()
+
+	c.sendTaskToSpecialist(crawlerID, "Crawl entire website starting from "+baseURL)
+}
+
+// spawnLoginSpecialist creates and registers a new LoginSpecialist
+func (c *Commander) spawnLoginSpecialist(loginURL string, credentials map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.counters["LoginAgent"]++
+	count := c.counters["LoginAgent"]
+	loginID := fmt.Sprintf("LoginAgent-%02d", count)
+
+	executor, _ := c.selectExecutor(loginID)
+
+	log.Printf("[%s] Spawning LoginSpecialist for %s...\n", c.id, loginURL)
+	loginAgent := specialist.NewLoginSpecialist(c.ctx, loginID, c.bus, c.brain, loginURL, executor, credentials)
+
+	c.specialists[loginID] = loginAgent
+
+	c.bus.Subscribe(loginID, func(e bus.Event) {
+		loginAgent.OnEvent(e)
+	})
+
+	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, loginID)
+
+	go func() {
+		if err := loginAgent.Run(); err != nil {
+			log.Printf("[%s] LoginSpecialist crashed: %v\n", c.id, err)
+		}
+	}()
+
+	c.sendTaskToSpecialist(loginID, "Attempt login on "+loginURL)
 }

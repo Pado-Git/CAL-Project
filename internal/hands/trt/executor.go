@@ -29,10 +29,17 @@ func NewRemoteExecutor(client *Client, paw string, platform string) *RemoteExecu
 // Note: 'imageName' is ignored or treated as 'tool type' context in this remote scenario.
 // 'cmd' args are joined to form the command string.
 func (e *RemoteExecutor) RunTool(ctx context.Context, imageName string, cmd []string) (string, error) {
-	// Construct command string
-	// For Windows cmd, we might need to join differently, but simple space join is a good start for most args.
-	// If command is complex, we might rely on the template system passing a full script.
-	fullCommand := strings.Join(cmd, " ")
+	// Construct command string with proper escaping
+	// Arguments containing special characters (&, |, <, >, etc.) need to be quoted
+	var escapedArgs []string
+	for _, arg := range cmd {
+		if needsQuoting(arg) {
+			escapedArgs = append(escapedArgs, fmt.Sprintf("\"%s\"", arg))
+		} else {
+			escapedArgs = append(escapedArgs, arg)
+		}
+	}
+	fullCommand := strings.Join(escapedArgs, " ")
 
 	// Determine executor based on platform
 	executorName := "command_prompt"
@@ -90,4 +97,19 @@ func (e *RemoteExecutor) RunTool(ctx context.Context, imageName string, cmd []st
 
 func (e *RemoteExecutor) Close() error {
 	return nil
+}
+
+// needsQuoting checks if an argument contains special shell characters
+// that require quoting to prevent shell interpretation
+func needsQuoting(arg string) bool {
+	// Core special characters that MUST be quoted for shell safety
+	// Note: ?, =, () are excluded as they're safe in most contexts (URLs, etc)
+	// &, |, ;, space are critical for preventing command injection
+	specialChars := "&|<>; $`\\\""
+	for _, char := range specialChars {
+		if strings.ContainsRune(arg, char) {
+			return true
+		}
+	}
+	return false
 }

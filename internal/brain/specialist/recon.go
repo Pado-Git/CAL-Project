@@ -6,6 +6,7 @@ import (
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
 	"cal-project/internal/hands/tools"
+	"cal-project/internal/hands/trt"
 	"context"
 	"fmt"
 	"log"
@@ -18,23 +19,27 @@ var messageCounter atomic.Uint64
 
 // ReconSpecialist is a specialist agent focused on reconnaissance
 type ReconSpecialist struct {
-	id       string
-	bus      bus.Bus
-	brain    llm.LLM
-	ctx      context.Context
-	target   string
-	executor tools.ToolExecutor
+	id        string
+	bus       bus.Bus
+	brain     llm.LLM
+	ctx       context.Context
+	target    string
+	executor  tools.ToolExecutor
+	trtClient *trt.Client
+	agentPaw  string // PAW of the agent performing the scan
 }
 
 // NewReconSpecialist creates a new ReconSpecialist agent
-func NewReconSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor) *ReconSpecialist {
+func NewReconSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor, trtClient *trt.Client, agentPaw string) *ReconSpecialist {
 	return &ReconSpecialist{
-		id:       id,
-		bus:      eventBus,
-		brain:    llmClient,
-		ctx:      ctx,
-		target:   target,
-		executor: executor,
+		id:        id,
+		bus:       eventBus,
+		brain:     llmClient,
+		ctx:       ctx,
+		target:    target,
+		executor:  executor,
+		trtClient: trtClient,
+		agentPaw:  agentPaw,
 	}
 }
 
@@ -119,6 +124,44 @@ func (r *ReconSpecialist) executeTask(cmdEvent bus.Event) {
 		}
 
 		log.Printf("[%s] Tool output (first 200 chars): %s\n", r.id, truncate(output, 200))
+
+		// If TRT Client is available and this is a scan result, send to TRT
+		if r.trtClient != nil && r.agentPaw != "" && strings.Contains(output, "Starting Nmap") {
+			log.Printf("[%s] Sending scan results to TRT...\n", r.id)
+
+			// Get last scan results
+			scanResults := tools.GetLastScanResults()
+			if len(scanResults) > 0 {
+				// Convert to TRT format
+				var trtHosts []trt.ScanResultHost
+				for _, result := range scanResults {
+					var trtPorts []trt.ScanResultPort
+					for _, port := range result.OpenPorts {
+						trtPorts = append(trtPorts, trt.ScanResultPort{
+							Port:     port.Port,
+							Protocol: port.Protocol,
+							State:    port.State,
+							Service:  port.Service,
+						})
+					}
+					trtHosts = append(trtHosts, trt.ScanResultHost{
+						IP:    result.Host,
+						Ports: trtPorts,
+					})
+				}
+
+				// Send to TRT
+				if err := r.trtClient.SaveScanResult(r.agentPaw, trtHosts); err != nil {
+					log.Printf("[%s] Failed to save scan results to TRT: %v\n", r.id, err)
+				} else {
+					log.Printf("[%s] Successfully saved %d hosts to TRT\n", r.id, len(trtHosts))
+				}
+
+				// Clear last scan results
+				tools.ClearLastScanResults()
+			}
+		}
+
 		r.reportObservation(cmdEvent.FromAgent, fmt.Sprintf("Recon completed. Output: %s", truncate(output, 5000)))
 	} else {
 		r.reportObservation(cmdEvent.FromAgent, fmt.Sprintf("Recon plan generated (Hands unavailable): %s", plan))

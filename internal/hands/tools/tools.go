@@ -3,6 +3,10 @@ package tools
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
 )
 
 // ToolExecutor defines the interface for executing tools
@@ -10,10 +14,42 @@ type ToolExecutor interface {
 	RunTool(ctx context.Context, imageName string, cmd []string) (string, error)
 }
 
-// NmapScan runs a port scan
+// lastScanResults stores the last scan results for TRT integration
+var (
+	lastScanResults []ScanResult
+	lastScanMutex   sync.RWMutex
+)
+
+// GetLastScanResults returns the last scan results
+func GetLastScanResults() []ScanResult {
+	lastScanMutex.RLock()
+	defer lastScanMutex.RUnlock()
+	return lastScanResults
+}
+
+// ClearLastScanResults clears the last scan results
+func ClearLastScanResults() {
+	lastScanMutex.Lock()
+	defer lastScanMutex.Unlock()
+	lastScanResults = nil
+}
+
+// NmapScan 순수 Go TCP 스캐너 사용 (nmap 호환 출력)
+// executor 매개변수는 호환성을 위해 유지하지만 사용하지 않음
 func NmapScan(ctx context.Context, executor ToolExecutor, target string) (string, error) {
-	cmd := []string{"nmap", "-p", "22,80,443", target}
-	return executor.RunTool(ctx, "cal/nmap", cmd)
+	startTime := time.Now()
+
+	results, err := ScanNetwork(ctx, target, DefaultPorts, PortTimeout)
+	if err != nil {
+		return "", fmt.Errorf("scan failed: %w", err)
+	}
+
+	// Store results for TRT integration
+	lastScanMutex.Lock()
+	lastScanResults = results
+	lastScanMutex.Unlock()
+
+	return FormatAsNmap(results, time.Since(startTime)), nil
 }
 
 // SubfinderScan runs subfinder for subdomain enumeration
@@ -29,9 +65,42 @@ func HttpxProbe(ctx context.Context, executor ToolExecutor, target string) (stri
 	return executor.RunTool(ctx, "projectdiscovery/httpx", cmd)
 }
 
-// SimpleHTTPGet performs a basic HTTP GET using curl
-func SimpleHTTPGet(ctx context.Context, executor ToolExecutor, url string) (string, error) {
-	cmd := []string{"curl", "-s", "-L", "-i", url}
+// SimpleHTTPGet performs a basic HTTP GET using curl (without cookie)
+func SimpleHTTPGet(ctx context.Context, executor ToolExecutor, urlStr string) (string, error) {
+	return HTTPGetWithCookie(ctx, executor, urlStr, "")
+}
+
+// HTTPGetWithCookie performs HTTP GET with optional session cookie
+func HTTPGetWithCookie(ctx context.Context, executor ToolExecutor, urlStr string, cookie string) (string, error) {
+	var cmd []string
+	if cookie != "" {
+		cmd = []string{"curl", "-s", "-L", "-i", "-H", fmt.Sprintf("Cookie: %s", cookie), urlStr}
+	} else {
+		cmd = []string{"curl", "-s", "-L", "-i", urlStr}
+	}
+	return executor.RunTool(ctx, "cal/curl:latest", cmd)
+}
+
+// HTTPPost performs HTTP POST with form data and optional cookie
+func HTTPPost(ctx context.Context, executor ToolExecutor, urlStr string, formData map[string]string, cookie string) (string, error) {
+	// Build form data string: "field1=value1&field2=value2"
+	var formParts []string
+	for key, value := range formData {
+		formParts = append(formParts, fmt.Sprintf("%s=%s",
+			url.QueryEscape(key),
+			url.QueryEscape(value)))
+	}
+	formDataStr := strings.Join(formParts, "&")
+
+	// Build curl command
+	cmd := []string{"curl", "-s", "-L", "-i", "-X", "POST"}
+
+	if cookie != "" {
+		cmd = append(cmd, "-H", fmt.Sprintf("Cookie: %s", cookie))
+	}
+
+	cmd = append(cmd, "-d", formDataStr, urlStr)
+
 	return executor.RunTool(ctx, "cal/curl:latest", cmd)
 }
 

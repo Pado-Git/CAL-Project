@@ -322,6 +322,60 @@ func (c *Client) GetNetworkNodes() ([]NetworkNode, error) {
 	return nodes, nil
 }
 
+// ScanResultPort represents a discovered port
+type ScanResultPort struct {
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
+	State    string `json:"state"`
+	Service  string `json:"service"`
+}
+
+// ScanResultHost represents a discovered host
+type ScanResultHost struct {
+	IP       string           `json:"ip"`
+	Hostname string           `json:"hostname,omitempty"`
+	Ports    []ScanResultPort `json:"ports"`
+}
+
+// ScanResultRequest represents the scan result payload
+type ScanResultRequest struct {
+	SourcePAW string           `json:"source_paw"`
+	Hosts     []ScanResultHost `json:"hosts"`
+}
+
+// SaveScanResult sends scan results to TRT for storage
+func (c *Client) SaveScanResult(sourcePAW string, hosts []ScanResultHost) error {
+	reqBody := ScanResultRequest{
+		SourcePAW: sourcePAW,
+		Hosts:     hosts,
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal scan result: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/networknodes/scan-result", c.BaseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return err
+	}
+	c.addAuthHeader(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to save scan result: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("save scan result failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 func (c *Client) addAuthHeader(req *http.Request) {
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
