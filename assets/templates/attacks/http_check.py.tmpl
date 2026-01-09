@@ -1,0 +1,33 @@
+import urllib.request
+import urllib.error
+import ssl
+import sys
+
+# Standard library only to avoid dependency issues on agent
+target_url = "{{.TargetURL}}"
+
+def check_url(url):
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
+            print(f"Status: {response.getcode()}")
+            print("Headers:")
+            for k, v in response.info().items():
+                print(f"{k}: {v}")
+            
+            body = response.read().decode('utf-8', errors='ignore')
+            print("\nBodyPreview:")
+            print(body[:1000])
+
+    except urllib.error.HTTPError as e:
+        print(f"Status: {e.code}")
+        print(f"Error: {e.reason}")
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    check_url(target_url)

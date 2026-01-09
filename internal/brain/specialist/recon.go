@@ -5,12 +5,12 @@ import (
 	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
-	"cal-project/internal/hands/docker"
 	"cal-project/internal/hands/tools"
 	"context"
 	"fmt"
 	"log"
 	"net/url"
+	"strings"
 	"sync/atomic"
 )
 
@@ -23,23 +23,18 @@ type ReconSpecialist struct {
 	brain    llm.LLM
 	ctx      context.Context
 	target   string
-	executor *docker.Executor
+	executor tools.ToolExecutor
 }
 
 // NewReconSpecialist creates a new ReconSpecialist agent
-func NewReconSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *ReconSpecialist {
-	exec, err := docker.NewExecutor(id)
-	if err != nil {
-		log.Printf("[%s] Warning: Failed to create Docker executor: %v. Tools will not run.\n", id, err)
-	}
-
+func NewReconSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor) *ReconSpecialist {
 	return &ReconSpecialist{
 		id:       id,
 		bus:      eventBus,
 		brain:    llmClient,
 		ctx:      ctx,
 		target:   target,
-		executor: exec,
+		executor: executor,
 	}
 }
 
@@ -88,7 +83,14 @@ func (r *ReconSpecialist) executeTask(cmdEvent bus.Event) {
 
 	// Execute the tool using Hands
 	if r.executor != nil {
-		toolFunc, target, err := tools.ParseToolRequest(plan + " " + r.target)
+		// Construct tool request. Prefer LLM plan if it has arguments (e.g., 'nmap <subnet>').
+		// Only append default target if plan is just a single word (e.g., 'nmap').
+		toolRequest := plan
+		if !strings.Contains(strings.TrimSpace(plan), " ") {
+			toolRequest = plan + " " + r.target
+		}
+
+		toolFunc, target, err := tools.ParseToolRequest(toolRequest)
 		if err != nil {
 			log.Printf("[%s] Failed to parse tool request: %v\n", r.id, err)
 			r.reportError(cmdEvent.FromAgent, err)
@@ -117,7 +119,7 @@ func (r *ReconSpecialist) executeTask(cmdEvent bus.Event) {
 		}
 
 		log.Printf("[%s] Tool output (first 200 chars): %s\n", r.id, truncate(output, 200))
-		r.reportObservation(cmdEvent.FromAgent, fmt.Sprintf("Recon completed. Output: %s", truncate(output, 500)))
+		r.reportObservation(cmdEvent.FromAgent, fmt.Sprintf("Recon completed. Output: %s", truncate(output, 5000)))
 	} else {
 		r.reportObservation(cmdEvent.FromAgent, fmt.Sprintf("Recon plan generated (Hands unavailable): %s", plan))
 	}

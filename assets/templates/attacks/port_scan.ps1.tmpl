@@ -1,0 +1,37 @@
+$Target = "{{.TargetIP}}"
+$Ports = {{.Ports}} # e.g. 1..1024 or @(80, 443, 8080)
+
+Write-Output "Starting PowerShell TCP Scan against $Target"
+
+# Create a list of jobs
+$Jobs = @()
+
+if ($Ports -is [string]) {
+    if ($Ports -eq "all") {
+        # Scan common ports to save time (Top 100) instead of 65535 which is too slow for PS one-liner
+        $PortArray = @(21,22,23,25,53,80,110,135,139,143,389,443,445,993,995,1433,1521,3306,3389,5432,5900,8000,8080,8081,8082,8443)
+    } else {
+        $PortArray = $Ports -split ','
+    }
+} else {
+    $PortArray = $Ports
+}
+
+foreach ($Port in $PortArray) {
+    $Port = [int]$Port
+    try {
+        $TcpClient = New-Object System.Net.Sockets.TcpClient
+        $Connect = $TcpClient.BeginConnect($Target, $Port, $null, $null)
+        $Wait = $Connect.AsyncWaitHandle.WaitOne(200, $false) # 200ms timeout
+        if ($Wait -and $TcpClient.Connected) {
+             Write-Output "Discovered Open Port: $Port/tcp on $Target"
+             $TcpClient.EndConnect($Connect)
+        }
+        $TcpClient.Close()
+        if ($TcpClient -is [IDisposable]) { $TcpClient.Dispose() }
+    } catch {
+        # Ignore errors
+    }
+}
+
+Write-Output "Scan Complete."

@@ -2,9 +2,9 @@ package specialist
 
 import (
 	"cal-project/internal/brain/llm"
+	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
-	"cal-project/internal/hands/docker"
 	"cal-project/internal/hands/tools"
 	"context"
 	"fmt"
@@ -23,23 +23,18 @@ type WebSpecialist struct {
 	brain    llm.LLM
 	ctx      context.Context
 	target   string
-	executor *docker.Executor
+	executor tools.ToolExecutor
 }
 
 // NewWebSpecialist creates a new WebSpecialist agent
-func NewWebSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *WebSpecialist {
-	exec, err := docker.NewExecutor(id)
-	if err != nil {
-		log.Printf("[%s] Warning: Failed to create Docker executor: %v. Tools will not run.\n", id, err)
-	}
-
+func NewWebSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor) *WebSpecialist {
 	return &WebSpecialist{
 		id:       id,
 		bus:      eventBus,
 		brain:    llmClient,
 		ctx:      ctx,
 		target:   target,
-		executor: exec,
+		executor: executor,
 	}
 }
 
@@ -126,25 +121,23 @@ func (w *WebSpecialist) analyzeForVulnerabilities(httpResponse string) string {
 		responseToAnalyze = httpResponse[:3000]
 	}
 
-	// Use LLM to analyze HTTP response for security issues
-	prompt := fmt.Sprintf(
-		"Analyze this HTTP response for XSS and security vulnerabilities.\n\n"+
-			"HTTP Response:\n%s\n\n"+
-			"TASK:\n"+
-			"1. Check for input forms - are they vulnerable to XSS?\n"+
-			"2. Look for reflected user input in the response\n"+
-			"3. Check security headers (X-Frame-Options, CSP, etc.)\n"+
-			"4. Identify exposed sensitive information\n\n"+
-			"Reply with findings in 3-4 sentences. Be specific about vulnerabilities found.",
-		responseToAnalyze,
-	)
+	// Use LLM to analyze HTTP response for security issues (JSON output)
+	prompt := prompts.GetWebAnalysis(responseToAnalyze)
 
 	analysis, err := w.brain.Generate(w.ctx, prompt)
 	if err != nil {
 		log.Printf("[%s] LLM analysis failed: %v\n", w.id, err)
-		return "❌ Unable to analyze (LLM error)"
+		return `{"vulnerabilities": [], "error": "LLM analysis failed"}`
 	}
 
+	// Clean up response - remove markdown code blocks if present
+	analysis = strings.TrimSpace(analysis)
+	analysis = strings.TrimPrefix(analysis, "```json")
+	analysis = strings.TrimPrefix(analysis, "```")
+	analysis = strings.TrimSuffix(analysis, "```")
+	analysis = strings.TrimSpace(analysis)
+
+	log.Printf("[%s] Vulnerability analysis JSON: %s\n", w.id, analysis)
 	return analysis
 }
 
@@ -167,9 +160,11 @@ func (w *WebSpecialist) generateReport(httpResponse string, analysis string) str
 		}
 	}
 
-	// LLM Security Analysis
-	report += "\n--- Security Analysis ---\n"
+	// Vulnerability Analysis JSON (for Commander to parse)
+	report += "\n--- Vulnerability Analysis (JSON) ---\n"
+	report += "VULN_JSON_START\n"
 	report += analysis + "\n"
+	report += "VULN_JSON_END\n"
 
 	return report
 }

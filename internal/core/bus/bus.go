@@ -16,6 +16,7 @@ const (
 	Finding     EventType = "FINDING"
 	Error       EventType = "ERROR"
 	Command     EventType = "COMMAND"
+	Engagement  EventType = "ENGAGEMENT"
 )
 
 // Event (AgentMessage) represents the standardized message exchanged between agents

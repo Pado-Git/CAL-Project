@@ -35,7 +35,7 @@ func (e *Executor) RunTool(ctx context.Context, imageName string, cmd []string) 
 	// Generate deterministic name
 	sanitizedImage := strings.ReplaceAll(imageName, "/", "-")
 	sanitizedImage = strings.ReplaceAll(sanitizedImage, ":", "-")
-	containerName := fmt.Sprintf("xbow-%s-%s", e.ownerID, sanitizedImage)
+	containerName := fmt.Sprintf("cal-%s-%s", e.ownerID, sanitizedImage)
 
 	log.Printf("[Docker] Using local image: %s\n", imageName)
 	log.Printf("[Docker] Ensuring clean state for container: %s\n", containerName)

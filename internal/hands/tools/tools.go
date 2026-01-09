@@ -12,7 +12,7 @@ type ToolExecutor interface {
 
 // NmapScan runs a port scan
 func NmapScan(ctx context.Context, executor ToolExecutor, target string) (string, error) {
-	cmd := []string{"nmap", "-p-", "--min-rate", "1000", "-T4", target}
+	cmd := []string{"nmap", "-p", "22,80,443", target}
 	return executor.RunTool(ctx, "cal/nmap", cmd)
 }
 

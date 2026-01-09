@@ -5,7 +5,6 @@ import (
 	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
-	"cal-project/internal/hands/docker"
 	"cal-project/internal/hands/tools"
 	"context"
 	"fmt"
@@ -24,23 +23,18 @@ type XSSSpecialist struct {
 	brain    llm.LLM
 	ctx      context.Context
 	target   string
-	executor *docker.Executor
+	executor tools.ToolExecutor
 }
 
 // NewXSSSpecialist creates a new XSSSpecialist agent
-func NewXSSSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *XSSSpecialist {
-	exec, err := docker.NewExecutor(id)
-	if err != nil {
-		log.Printf("[%s] Warning: Failed to create Docker executor: %v. Tools will not run.\n", id, err)
-	}
-
+func NewXSSSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor) *XSSSpecialist {
 	return &XSSSpecialist{
 		id:       id,
 		bus:      eventBus,
 		brain:    llmClient,
 		ctx:      ctx,
 		target:   target,
-		executor: exec,
+		executor: executor,
 	}
 }
 

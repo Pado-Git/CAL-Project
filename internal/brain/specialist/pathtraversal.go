@@ -5,7 +5,6 @@ import (
 	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
-	"cal-project/internal/hands/docker"
 	"cal-project/internal/hands/tools"
 	"context"
 	"fmt"
@@ -24,23 +23,18 @@ type PathTraversalSpecialist struct {
 	brain    llm.LLM
 	ctx      context.Context
 	target   string
-	executor *docker.Executor
+	executor tools.ToolExecutor
 }
 
 // NewPathTraversalSpecialist creates a new PathTraversalSpecialist agent
-func NewPathTraversalSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *PathTraversalSpecialist {
-	exec, err := docker.NewExecutor(id)
-	if err != nil {
-		log.Printf("[%s] Warning: Failed to create Docker executor: %v. Tools will not run.\n", id, err)
-	}
-
+func NewPathTraversalSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor) *PathTraversalSpecialist {
 	return &PathTraversalSpecialist{
 		id:       id,
 		bus:      eventBus,
 		brain:    llmClient,
 		ctx:      ctx,
 		target:   target,
-		executor: exec,
+		executor: executor,
 	}
 }
 

@@ -23,18 +23,22 @@ type VulnerabilityFinding struct {
 
 // Reporter collects findings and generates reports
 type Reporter struct {
-	id       string
-	bus      bus.Bus
-	findings []VulnerabilityFinding
-	mu       sync.RWMutex
+	id             string
+	bus            bus.Bus
+	target         string
+	engagedTargets []string
+	findings       []VulnerabilityFinding
+	mu             sync.RWMutex
 }
 
 // NewReporter creates a new Reporter agent
-func NewReporter(eventBus bus.Bus) *Reporter {
+func NewReporter(eventBus bus.Bus, target string) *Reporter {
 	return &Reporter{
-		id:       "Reporter-01",
-		bus:      eventBus,
-		findings: make([]VulnerabilityFinding, 0),
+		id:             "Reporter-01",
+		bus:            eventBus,
+		target:         target,
+		engagedTargets: make([]string, 0),
+		findings:       make([]VulnerabilityFinding, 0),
 	}
 }
 
@@ -57,6 +61,30 @@ func (r *Reporter) OnEvent(event bus.Event) {
 	if event.Type == bus.Finding {
 		r.processFinding(event)
 	}
+	if event.Type == bus.Engagement {
+		r.processEngagement(event)
+	}
+}
+
+func (r *Reporter) processEngagement(event bus.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	target, ok := event.Payload.(string)
+	if !ok {
+		return
+	}
+
+	// De-duplicate
+	for _, t := range r.engagedTargets {
+		if t == target {
+			return
+		}
+	}
+
+	r.engagedTargets = append(r.engagedTargets, target)
+	log.Printf("[%s] 🎯 Engagement Recorded: %s\n", r.id, target)
+	r.generateMarkdownReport()
 }
 
 func (r *Reporter) processFinding(event bus.Event) {
@@ -106,8 +134,21 @@ func (r *Reporter) generateMarkdownReport() {
 	filename := "security_report.md"
 
 	content := "# CAL Security Assessment Report\n\n"
+	content += fmt.Sprintf("**Target:** %s\n", r.target)
 	content += fmt.Sprintf("**Generated:** %s\n", time.Now().Format(time.RFC1123))
+	content += fmt.Sprintf("**Engaged Targets:** %d\n", len(r.engagedTargets))
 	content += fmt.Sprintf("**Total Findings:** %d\n\n", len(r.findings))
+
+	content += "## Attack Targets\n"
+	if len(r.engagedTargets) == 0 {
+		content += "No targets have been actively engaged yet.\n"
+	} else {
+		content += "The following targets were identified and subjected to active security testing:\n"
+		for _, t := range r.engagedTargets {
+			content += fmt.Sprintf("- `%s`\n", t)
+		}
+		content += "\n"
+	}
 
 	content += "## Executive Summary\n"
 	if len(r.findings) == 0 {

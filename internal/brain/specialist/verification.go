@@ -5,7 +5,6 @@ import (
 	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
-	"cal-project/internal/hands/docker"
 	"cal-project/internal/hands/tools"
 	"context"
 	"encoding/json"
@@ -43,23 +42,18 @@ type VerificationSpecialist struct {
 	brain    llm.LLM
 	ctx      context.Context
 	target   string
-	executor *docker.Executor
+	executor tools.ToolExecutor
 }
 
 // NewVerificationSpecialist creates a new VerificationSpecialist agent
-func NewVerificationSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string) *VerificationSpecialist {
-	exec, err := docker.NewExecutor(id)
-	if err != nil {
-		log.Printf("[%s] Warning: Failed to create Docker executor: %v\n", id, err)
-	}
-
+func NewVerificationSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor) *VerificationSpecialist {
 	return &VerificationSpecialist{
 		id:       id,
 		bus:      eventBus,
 		brain:    llmClient,
 		ctx:      ctx,
 		target:   target,
-		executor: exec,
+		executor: executor,
 	}
 }
 

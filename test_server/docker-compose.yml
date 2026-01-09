@@ -9,3 +9,9 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Seoul
+    networks:
+      - cai-net
+
+networks:
+  cai-net:
+    driver: bridge

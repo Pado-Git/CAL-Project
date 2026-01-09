@@ -19,9 +19,9 @@
     *   **Social Eng Agent**: (필요시) 피싱 시나리오 설계 등.
     *   **장점**: 서로 다른 영역을 병렬로 동시에 공격(Parallel Execution)하여 속도를 비약적으로 높입니다.
 
-*   **실행 노드 (Execution Nodes - The Hands)**
-    *   **역할**: 각 에이전트의 요청을 받아 실제로 도구를 실행하는 "손".
-    *   **구조**: 스페셜리스트 에이전트 1명당 N개의 실행 노드를 거느릴 수 있어 대규모 병렬 스캐닝이 가능합니다.
+*   **실행 노드 (Execution Nodes - The Hands: TRT Agents)**
+    *   **역할**: Brain의 명령을 받아 실제로 도구를 실행하는 원격 에이전트 (Callisto Agents).
+    *   **구조**: TRT C2 서버(`toncal`)를 통해 연결된 분산 에이전트들이 명령을 수행합니다. 필요에 따라 에이전트는 로컬 도구(`nmap`, `curl` 등)를 실행하거나 컨테이너를 활용할 수 있습니다.
 
 
 ## 2. 골든 룰: 능동적 검증 (환각 제로 / Zero Hallucination)
@@ -45,8 +45,9 @@ AI는 바퀴를 다시 발명하지 않습니다. 검증된 최고의 보안 도
 *   **익스플로잇(Exploitation)**: `Metasploit` (RPC), 커스텀 Python 스크립트.
 
 ### 에이전트 환경 (Agent Environment)
-*   **샌드박싱(Sandboxing)**: 모든 "Hands"의 실행은 일회성 Docker 컨테이너 내에서 이루어져야 하며, 호스트 시스템 손상이나 불필요한 흔적(Persistence)을 방지합니다.
-*   **헤드리스 브라우저**: XSS, CSRF, 로직 버그 검증을 위해 실제 브라우저(Puppeteer/Playwright)를 활용합니다.
+*   **원격 실행 (Remote Execution)**: 모든 "Hands"의 역할은 **TRT(Callisto) Agent**가 수행합니다. Cai는 직접 도구를 실행하지 않고, TRT C2 서버를 통해 에이전트에게 명령(Nmap, Curl 등)을 하달합니다.
+*   **샌드박싱(Sandboxing)**: 에이전트는 독립된 환경(VM 또는 물리적 머신)에서 실행되어야 하며, 로컬 Cai 시스템과 분리되어야 합니다.
+*   **헤드리스 브라우저**: XSS, CSRF 검증 또한 에이전트가 수행하거나, 필요한 경우 Cai가 특수 목적의 컨테이너를 통해 수행합니다.
 
 ## 4. 운영 워크플로우 (Operational Workflow)
 

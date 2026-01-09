@@ -15,6 +15,7 @@ import (
 	"cal-project/internal/core/bus"
 	"cal-project/internal/core/orchestrator"
 	"cal-project/internal/core/reporter"
+	"cal-project/internal/hands/trt"
 
 	"github.com/joho/godotenv"
 )
@@ -63,22 +64,26 @@ func main() {
 	}
 	defer llmClient.Close()
 
-	// 4. Initialize Commander Agent
+	// 4. Initialize TRT Client
+	trtClient := trt.NewClient()
+
+	// 5. Initialize Commander Agent
 	targetURL := os.Getenv("TARGET_URL")
 	if targetURL == "" {
 		targetURL = "http://example.com" // Default fallback
 	}
-	cmdr := commander.NewCommander(ctx, eventBus, llmClient, targetURL)
+	// Now passing trtClient to Commander
+	cmdr := commander.NewCommander(ctx, eventBus, llmClient, targetURL, trtClient)
 	orch.RegisterAgent(cmdr)
 
-	// 5. Initialize Reporter Agent
-	reporterAgent := reporter.NewReporter(eventBus)
+	// 6. Initialize Reporter Agent
+	reporterAgent := reporter.NewReporter(eventBus, targetURL)
 	orch.RegisterAgent(reporterAgent)
 
-	// 6. Start System
+	// 7. Start System
 	orch.Start()
 
-	// 6. Wait for tasks to complete or user interrupt
+	// 8. Wait for tasks to complete or user interrupt
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -87,7 +92,7 @@ func main() {
 	case <-sigChan:
 		log.Println("User interrupt received")
 	case <-time.After(120 * time.Second):
-		log.Println("Timeout reached (60s)")
+		log.Println("Timeout reached (120s)")
 	}
 
 	orch.Stop()
