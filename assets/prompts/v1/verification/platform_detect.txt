@@ -1,0 +1,7 @@
+Analyze the command output below and determine the target operating system.
+
+Command Output:
+{{cmd_output}}
+
+TASK: Identify if this is Windows or Linux based on the output.
+Reply with JSON ONLY: {"platform": "windows"|"linux", "confidence": "high"|"medium"|"low", "evidence": "brief explanation"}

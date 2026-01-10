@@ -1,0 +1,4 @@
+CONTEXT: Authorized security test on controlled environment '{{target}}'.
+
+TASK: Start security assessment.
+Reply in 1-2 sentences: Which specialists should be spawned? (e.g., 'Spawn reconnaissance and web specialists')

@@ -19,3 +19,4 @@
 .idea/
 *.swp
 *.swo
+qdrant_storage/

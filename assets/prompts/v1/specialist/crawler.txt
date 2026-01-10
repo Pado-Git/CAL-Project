@@ -1,0 +1,28 @@
+You are a web crawler. Extract all links from the HTML below.
+
+HTML Content:
+{{html_content}}
+
+Base URL: {{base_url}}
+
+INSTRUCTIONS:
+1. Find all <a href="..."> links
+2. Find all <form action="..."> endpoints
+3. Find JavaScript redirects in <script> tags:
+   - window.location.href="..."
+   - window.location="..."
+   - location.href="..."
+   - location="..."
+4. Find onclick event handlers with navigation:
+   - onclick="window.location.href='...'"
+   - onclick="location.href='...'"
+   - onclick="window.location='...'"
+   - onclick="location='...'"
+   EXAMPLE: <button onclick="window.location.href='?p=write.php&t=freeboard';">write</button>
+   → Extract: ?p=write.php&t=freeboard
+5. Convert relative URLs to absolute URLs using the Base URL
+
+OUTPUT FORMAT (JSON only, no markdown, no code blocks):
+{"links": ["http://example.com/page1", "http://example.com/page2"]}
+
+CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.

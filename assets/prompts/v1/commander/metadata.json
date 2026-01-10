@@ -1,0 +1,16 @@
+{
+  "initial": {
+    "file": "commander/initial.txt",
+    "version": "1.0.0",
+    "variables": ["target"],
+    "output_format": "text",
+    "tags": ["commander", "initialization"]
+  },
+  "analyze": {
+    "file": "commander/analyze.txt",
+    "version": "1.0.0",
+    "variables": ["from_agent", "target", "observation"],
+    "output_format": "text",
+    "tags": ["commander", "analysis"]
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "web_analysis": {
+    "file": "specialist/web_analysis.txt",
+    "version": "1.0.0",
+    "variables": ["http_response"],
+    "output_format": "json",
+    "tags": ["specialist", "web", "vulnerability", "json"]
+  },
+  "xss_analysis": {
+    "file": "specialist/xss_analysis.txt",
+    "version": "1.0.0",
+    "variables": ["html_source"],
+    "output_format": "text",
+    "tags": ["specialist", "xss", "web"]
+  },
+  "sqli_analysis": {
+    "file": "specialist/sqli_analysis.txt",
+    "version": "1.0.0",
+    "variables": ["html_source"],
+    "output_format": "text",
+    "tags": ["specialist", "sqli", "database"]
+  },
+  "cmdi_analysis": {
+    "file": "specialist/cmdi_analysis.txt",
+    "version": "1.0.0",
+    "variables": ["html_source"],
+    "output_format": "text",
+    "tags": ["specialist", "cmdi", "command-injection"]
+  },
+  "path_traversal": {
+    "file": "specialist/path_traversal.txt",
+    "version": "1.0.0",
+    "variables": ["html_source"],
+    "output_format": "text",
+    "tags": ["specialist", "path-traversal", "lfi"]
+  },
+  "file_upload": {
+    "file": "specialist/file_upload.txt",
+    "version": "1.0.0",
+    "variables": ["html_source"],
+    "output_format": "text",
+    "tags": ["specialist", "file-upload", "rce"]
+  },
+  "crawler": {
+    "file": "specialist/crawler.txt",
+    "version": "1.0.0",
+    "variables": ["html_content", "base_url"],
+    "output_format": "json",
+    "tags": ["specialist", "crawler", "reconnaissance", "json"]
+  },
+  "login_form": {
+    "file": "specialist/login_form.txt",
+    "version": "1.0.0",
+    "variables": ["html_content"],
+    "output_format": "json",
+    "tags": ["specialist", "login", "authentication", "json"]
+  }
+}

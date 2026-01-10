@@ -1,9 +1,147 @@
 package prompts
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 )
+
+// Global manager instance (Phase 2: PromptManager with Hot Reload, Cache, Validation)
+var (
+	manager        *PromptManager
+	isInitialized  bool
+)
+
+// Initialize initializes the prompt management system
+// enableRAG parameter controls whether to use RAG mode (Phase 3 feature)
+func Initialize(ctx context.Context, enableRAG bool) error {
+	configPath := "assets/prompts/config.yaml"
+
+	// Load configuration
+	config, err := LoadConfigFromFile(configPath)
+	if err != nil {
+		log.Printf("[Prompts] Warning: Failed to load config: %v, using defaults", err)
+		// Continue with defaults - LoadConfigFromFile returns default config
+	}
+
+	// Apply RAG mode from CLI/ENV parameter (overrides config.yaml)
+	config.PromptSystem.RAG.Enabled = enableRAG
+
+	// Phase 2-3: Use full PromptManager with Hot Reload, Cache, Validation, and optional RAG
+	manager, err = NewPromptManager(ctx, config)
+	if err != nil {
+		log.Printf("[Prompts] Failed to create PromptManager: %v", err)
+		return err
+	}
+
+	isInitialized = true
+
+	// Log the active mode
+	if enableRAG {
+		log.Printf("[Prompts] RAG mode enabled (Qdrant vector search)")
+	} else {
+		log.Printf("[Prompts] Direct file loading mode (default)")
+	}
+
+	return nil
+}
+
+// Close cleans up prompt system resources
+func Close() {
+	if manager != nil {
+		manager.Close()
+	}
+	isInitialized = false
+	manager = nil
+}
+
+// getFormattedPrompt is the internal function that loads and formats a prompt
+func getFormattedPrompt(promptID string, vars map[string]interface{}) string {
+	// If not initialized, fall back to legacy prompts
+	if !isInitialized || manager == nil {
+		return getLegacyPrompt(promptID, vars)
+	}
+
+	// Try to load from PromptManager (with cache, validation, hot reload)
+	prompt, err := manager.Get(context.Background(), promptID)
+	if err != nil {
+		log.Printf("[Prompts] Failed to load prompt %s: %v, using legacy", promptID, err)
+		return getLegacyPrompt(promptID, vars)
+	}
+
+	// Format the prompt
+	formatted, err := Format(prompt, vars)
+	if err != nil {
+		log.Printf("[Prompts] Failed to format prompt %s: %v, using legacy", promptID, err)
+		return getLegacyPrompt(promptID, vars)
+	}
+
+	return formatted
+}
+
+// getLegacyPrompt returns the hardcoded prompt (fallback)
+func getLegacyPrompt(promptID string, vars map[string]interface{}) string {
+	// Map promptID to legacy Get* functions
+	switch promptID {
+	case "initial":
+		if target, ok := vars["target"].(string); ok {
+			return fmt.Sprintf(DefaultCommanderInitial, target)
+		}
+	case "analyze":
+		fromAgent, _ := vars["from_agent"].(string)
+		target, _ := vars["target"].(string)
+		observation, _ := vars["observation"].(string)
+		return fmt.Sprintf(DefaultCommanderAnalyze, fromAgent, target, observation)
+	case "decision":
+		target, _ := vars["target"].(string)
+		task, _ := vars["task"].(string)
+		return fmt.Sprintf(DefaultReconDecision, target, task)
+	case "web_analysis":
+		if httpResponse, ok := vars["http_response"].(string); ok {
+			return fmt.Sprintf(DefaultWebAnalysis, httpResponse)
+		}
+	case "xss_analysis":
+		if htmlSource, ok := vars["html_source"].(string); ok {
+			return fmt.Sprintf(DefaultXSSAnalysis, htmlSource)
+		}
+	case "sqli_analysis":
+		if htmlSource, ok := vars["html_source"].(string); ok {
+			return fmt.Sprintf(DefaultSQLiAnalysis, htmlSource)
+		}
+	case "cmdi_analysis":
+		if htmlSource, ok := vars["html_source"].(string); ok {
+			return fmt.Sprintf(DefaultCommandInjectionAnalysis, htmlSource)
+		}
+	case "path_traversal":
+		if htmlSource, ok := vars["html_source"].(string); ok {
+			return fmt.Sprintf(DefaultPathTraversalAnalysis, htmlSource)
+		}
+	case "file_upload":
+		if htmlSource, ok := vars["html_source"].(string); ok {
+			return fmt.Sprintf(DefaultFileUploadAnalysis, htmlSource)
+		}
+	case "crawler":
+		htmlContent, _ := vars["html_content"].(string)
+		baseURL, _ := vars["base_url"].(string)
+		return fmt.Sprintf(DefaultCrawlAnalysis, htmlContent, baseURL)
+	case "login_form":
+		if htmlContent, ok := vars["html_content"].(string); ok {
+			return fmt.Sprintf(DefaultLoginFormAnalysis, htmlContent)
+		}
+	case "extract":
+		if report, ok := vars["report"].(string); ok {
+			return fmt.Sprintf(DefaultVerifyExtract, report)
+		}
+	case "platform_detect":
+		if cmdOutput, ok := vars["cmd_output"].(string); ok {
+			return fmt.Sprintf(DefaultPlatformDetection, cmdOutput)
+		}
+	}
+
+	log.Printf("[Prompts] Unknown prompt ID: %s", promptID)
+	return fmt.Sprintf("ERROR: Unknown prompt %s", promptID)
+}
 
 // Default Prompts (English)
 const (
@@ -212,86 +350,95 @@ func LoadFromFile(path string) (string, error) {
 
 // GetCommanderInitial returns the prompt for Commander's initial thought
 func GetCommanderInitial(target string) string {
-	// Try to load from the new asset file first
-	if content, err := LoadFromFile("assets/prompts/commander_system.txt"); err == nil {
-		// Append context about the target to the system prompt
-		return fmt.Sprintf("%s\n\nCURRENT TARGET: %s", content, target)
-	}
-
-	// Fallback to legacy
-	format := getEnvOrDefault("PROMPT_COMMANDER_INITIAL", DefaultCommanderInitial)
-	return fmt.Sprintf(format, target)
+	return getFormattedPrompt("initial", map[string]interface{}{
+		"target": target,
+	})
 }
 
 // GetCommanderAnalyze returns the prompt for analyzing observations
 func GetCommanderAnalyze(fromAgent, target, observation string) string {
-	format := getEnvOrDefault("PROMPT_COMMANDER_ANALYZE", DefaultCommanderAnalyze)
-	return fmt.Sprintf(format, fromAgent, target, observation)
+	return getFormattedPrompt("analyze", map[string]interface{}{
+		"from_agent":  fromAgent,
+		"target":      target,
+		"observation": observation,
+	})
 }
 
 // GetReconDecision returns the prompt for Recon agent tool decision
 func GetReconDecision(target, task string) string {
-	format := getEnvOrDefault("PROMPT_RECON_DECISION", DefaultReconDecision)
-	return fmt.Sprintf(format, target, task)
+	return getFormattedPrompt("decision", map[string]interface{}{
+		"target": target,
+		"task":   task,
+	})
 }
 
 // GetXSSAnalysis returns the prompt for XSS analysis
 func GetXSSAnalysis(htmlSource string) string {
-	format := getEnvOrDefault("PROMPT_XSS_ANALYSIS", DefaultXSSAnalysis)
-	return fmt.Sprintf(format, htmlSource)
+	return getFormattedPrompt("xss_analysis", map[string]interface{}{
+		"html_source": htmlSource,
+	})
 }
 
 // GetSQLiAnalysis returns the prompt for SQLi analysis
 func GetSQLiAnalysis(htmlSource string) string {
-	format := getEnvOrDefault("PROMPT_SQLI_ANALYSIS", DefaultSQLiAnalysis)
-	return fmt.Sprintf(format, htmlSource)
+	return getFormattedPrompt("sqli_analysis", map[string]interface{}{
+		"html_source": htmlSource,
+	})
 }
 
 // GetVerifyExtract returns the prompt for extracting vulnerability info
 func GetVerifyExtract(report string) string {
-	format := getEnvOrDefault("PROMPT_VERIFY_EXTRACT", DefaultVerifyExtract)
-	// Check if prompt has %s placeholder
-	return fmt.Sprintf(format, report)
+	return getFormattedPrompt("extract", map[string]interface{}{
+		"report": report,
+	})
 }
 
 // GetPathTraversalAnalysis returns the prompt for Path Traversal analysis
 func GetPathTraversalAnalysis(htmlSource string) string {
-	format := getEnvOrDefault("PROMPT_PATHTRAVERSAL_ANALYSIS", DefaultPathTraversalAnalysis)
-	return fmt.Sprintf(format, htmlSource)
+	return getFormattedPrompt("path_traversal", map[string]interface{}{
+		"html_source": htmlSource,
+	})
 }
 
 // GetWebAnalysis returns the prompt for Web vulnerability analysis (JSON output)
 func GetWebAnalysis(httpResponse string) string {
-	format := getEnvOrDefault("PROMPT_WEB_ANALYSIS", DefaultWebAnalysis)
-	return fmt.Sprintf(format, httpResponse)
+	return getFormattedPrompt("web_analysis", map[string]interface{}{
+		"http_response": httpResponse,
+	})
 }
 
 // GetCommandInjectionAnalysis returns the prompt for Command Injection analysis
 func GetCommandInjectionAnalysis(htmlSource string) string {
-	format := getEnvOrDefault("PROMPT_CMDI_ANALYSIS", DefaultCommandInjectionAnalysis)
-	return fmt.Sprintf(format, htmlSource)
+	return getFormattedPrompt("cmdi_analysis", map[string]interface{}{
+		"html_source": htmlSource,
+	})
 }
 
 // GetPlatformDetection returns the prompt for OS platform detection
 func GetPlatformDetection(cmdOutput string) string {
-	format := getEnvOrDefault("PROMPT_PLATFORM_DETECTION", DefaultPlatformDetection)
-	return fmt.Sprintf(format, cmdOutput)
+	return getFormattedPrompt("platform_detect", map[string]interface{}{
+		"cmd_output": cmdOutput,
+	})
 }
 
 // GetFileUploadAnalysis returns the prompt for File Upload vulnerability analysis
 func GetFileUploadAnalysis(htmlSource string) string {
-	format := getEnvOrDefault("PROMPT_FILEUPLOAD_ANALYSIS", DefaultFileUploadAnalysis)
-	return fmt.Sprintf(format, htmlSource)
+	return getFormattedPrompt("file_upload", map[string]interface{}{
+		"html_source": htmlSource,
+	})
 }
 
 // GetCrawlAnalysis returns the prompt for web crawling and link extraction
 func GetCrawlAnalysis(htmlContent string, baseURL string) string {
-	format := getEnvOrDefault("PROMPT_CRAWL_ANALYSIS", DefaultCrawlAnalysis)
-	return fmt.Sprintf(format, htmlContent, baseURL)
+	return getFormattedPrompt("crawler", map[string]interface{}{
+		"html_content": htmlContent,
+		"base_url":     baseURL,
+	})
 }
 
 // GetLoginFormAnalysis returns the prompt for login form detection and analysis
 func GetLoginFormAnalysis(htmlContent string) string {
-	format := getEnvOrDefault("PROMPT_LOGIN_FORM_ANALYSIS", DefaultLoginFormAnalysis)
-	return fmt.Sprintf(format, htmlContent)
+	return getFormattedPrompt("login_form", map[string]interface{}{
+		"html_content": htmlContent,
+	})
 }

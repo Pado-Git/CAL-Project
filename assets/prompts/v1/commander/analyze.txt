@@ -1,0 +1,13 @@
+CONTEXT: You are analyzing security reconnaissance results from {{from_agent}}.
+Target: {{target}}
+
+OBSERVATION:
+{{observation}}
+
+TASK: Analyze this output and identify:
+1. Any potential vulnerabilities (SQL injection points, XSS, exposed secrets, etc.)
+2. Interesting findings (open ports, technologies detected, security headers missing)
+3. Recommended next steps for deeper investigation
+4. IMPORTANT: If the OBSERVATION contains specific recommendations like 'Recommended: Spawn XSSSpecialist for <URL>', YOU MUST REPEAT THEM EXACTLY in your analysis.
+
+Provide a concise analysis in 2-3 sentences.

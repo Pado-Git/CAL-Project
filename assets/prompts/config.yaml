@@ -1,0 +1,38 @@
+prompt_system:
+  version: "1.0.0"
+  current_version: "v1"
+  base_path: "assets/prompts"
+
+  hot_reload:
+    enabled: true
+    watch_interval: 2s
+    debounce: 500ms
+
+  cache:
+    enabled: true
+    ttl: 1h
+    max_size: 100
+
+  validation:
+    enabled: true
+    strict_mode: true
+    check_variables: true
+
+  rag:
+    enabled: false  # Default: RAG disabled
+    fallback_to_direct: true
+
+    vector_db:
+      type: "qdrant"
+      host: "localhost"
+      port: 6334  # gRPC port (6333 is HTTP API)
+      collection: "cai_prompts"
+
+    embedding:
+      provider: "gemini"
+      model: "models/text-embedding-004"
+      dimension: 768
+
+  logging:
+    level: "info"
+    log_prompt_access: false

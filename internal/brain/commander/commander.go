@@ -843,7 +843,9 @@ func (c *Commander) spawnCommandInjectionSpecialist(targetURL string, parameter 
 		}
 	}()
 
-	c.sendTaskToSpecialist(cmdiID, fmt.Sprintf("Deploy CallistoAgent via agent %s (target context: %s)", agent.Paw, targetURL))
+	// P1: Include parameter in task description for RCE verification
+	taskDesc := fmt.Sprintf("Deploy CallistoAgent via agent %s (target context: %s?%s=test)", agent.Paw, targetURL, parameter)
+	c.sendTaskToSpecialist(cmdiID, taskDesc)
 }
 
 // spawnAgentDeploymentSpecialist creates a specialist specifically for deploying agents

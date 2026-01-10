@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 
 	"cal-project/internal/brain/commander"
 	"cal-project/internal/brain/llm"
+	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/bus"
 	"cal-project/internal/core/orchestrator"
 	"cal-project/internal/core/reporter"
@@ -21,6 +23,11 @@ import (
 )
 
 func main() {
+	// CLI Flags
+	enableRAG := flag.Bool("enable-rag", false, "Enable RAG mode for prompt management")
+	ragShort := flag.Bool("rag", false, "Enable RAG mode (short flag)")
+	flag.Parse()
+
 	// Setup Multi-writer logging (Console + File)
 	logFile, err := os.OpenFile("cal-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
@@ -40,6 +47,27 @@ func main() {
 	fmt.Println("mode: Distributed Multi-Agent System (Go)")
 
 	ctx := context.Background()
+
+	// Determine RAG mode (CLI > ENV > config.yaml)
+	ragEnabled := *enableRAG || *ragShort
+	if !ragEnabled {
+		if os.Getenv("PROMPT_RAG_ENABLED") == "true" {
+			ragEnabled = true
+		}
+	}
+
+	// Initialize Prompt Management System
+	if err := prompts.Initialize(ctx, ragEnabled); err != nil {
+		log.Printf("Warning: Prompt system initialization failed: %v", err)
+		log.Printf("Falling back to legacy prompt mode")
+	} else {
+		if ragEnabled {
+			log.Printf("[Prompts] RAG mode enabled")
+		} else {
+			log.Printf("[Prompts] Direct file loading mode (default)")
+		}
+	}
+	defer prompts.Close()
 
 	// 1. Initialize Event Bus
 	eventBus := bus.NewMemoryBus(100)

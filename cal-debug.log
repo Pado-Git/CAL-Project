@@ -1115,3 +1115,148 @@ Error:
 2026/01/10 01:31:26 [TRT] Executing on ebfucw: curl -s -L -i http://192.168.127.128/sbadmin/?p=register.php (Executor: command_prompt)
 2026/01/10 01:31:27 User interrupt received
 2026/01/10 01:31:27 System halted.
+2026/01/10 20:54:25 [Prompts] Manager initialized successfully
+2026/01/10 20:54:25 [Prompts] Direct file loading mode (Phase 1)
+2026/01/10 20:54:25 [Prompts] Direct file loading mode (default)
+2026/01/10 20:54:25 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 20:54:25 [Commander-01] TRT: Authenticating...
+2026/01/10 20:54:25 [Reporter-01] Online. Listening for findings...
+2026/01/10 20:54:25 [Reporter-01] Report updated: security_report.md
+2026/01/10 20:54:27 [Commander-01] TRT Auth Failed: failed to authenticate: Post "http://192.168.50.10:8080/dev/generate-token": dial tcp 192.168.50.10:8080: connectex: No connection could be made because the target machine actively refused it.. Stopping Brain.
+2026/01/10 20:54:45 [Prompts] Manager initialized successfully
+2026/01/10 20:54:45 [Prompts] Direct file loading mode (Phase 1)
+2026/01/10 20:54:45 [Prompts] Warning: RAG mode requested but not implemented in Phase 1
+2026/01/10 20:54:45 [Prompts] RAG mode enabled
+2026/01/10 20:54:45 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 20:54:45 [Commander-01] TRT: Authenticating...
+2026/01/10 20:54:45 [Reporter-01] Online. Listening for findings...
+2026/01/10 20:54:45 [Reporter-01] Report updated: security_report.md
+2026/01/10 20:54:47 [Commander-01] TRT Auth Failed: failed to authenticate: Post "http://192.168.50.10:8080/dev/generate-token": dial tcp 192.168.50.10:8080: connectex: No connection could be made because the target machine actively refused it.. Stopping Brain.
+2026/01/10 21:12:09 [FileWatcher] Started watching: assets/prompts (debounce: 500ms)
+2026/01/10 21:12:09 [PromptManager] Initialized successfully
+2026/01/10 21:12:09 [Prompts] Direct file loading mode (Phase 2: Hot Reload + Cache + Validation)
+2026/01/10 21:12:09 [Prompts] Direct file loading mode (default)
+2026/01/10 21:12:09 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 21:12:09 [Reporter-01] Online. Listening for findings...
+2026/01/10 21:12:09 [Commander-01] TRT: Authenticating...
+2026/01/10 21:12:09 [Reporter-01] Report updated: security_report.md
+2026/01/10 21:12:11 [Commander-01] TRT Auth Failed: failed to authenticate: Post "http://192.168.50.10:8080/dev/generate-token": dial tcp 192.168.50.10:8080: connectex: No connection could be made because the target machine actively refused it.. Stopping Brain.
+2026/01/10 21:15:06 [FileWatcher] Started watching: assets/prompts (debounce: 500ms)
+2026/01/10 21:15:06 [PromptManager] Initialized successfully
+2026/01/10 21:15:06 [Prompts] Direct file loading mode (Phase 2: Hot Reload + Cache + Validation)
+2026/01/10 21:15:06 [Prompts] Direct file loading mode (default)
+2026/01/10 21:15:06 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 21:15:06 [Commander-01] TRT: Authenticating...
+2026/01/10 21:15:06 [Reporter-01] Online. Listening for findings...
+2026/01/10 21:15:06 [Reporter-01] Report updated: security_report.md
+2026/01/10 21:15:16 [Commander-01] TRT Auth Failed: failed to authenticate: Post "http://192.168.50.10:8080/dev/generate-token": context deadline exceeded (Client.Timeout exceeded while awaiting headers). Stopping Brain.
+2026/01/10 21:15:24 [PromptManager] File changed: assets\prompts\v1\specialist\xss_analysis.txt (type: write)
+2026/01/10 21:15:24 [PromptManager] Invalidated cache for: xss_analysis
+2026/01/10 21:16:19 [FileWatcher] Started watching: assets/prompts (debounce: 500ms)
+2026/01/10 21:16:19 [PromptManager] Initialized successfully
+2026/01/10 21:16:19 [Prompts] Direct file loading mode (Phase 2: Hot Reload + Cache + Validation)
+2026/01/10 21:16:19 [Prompts] Direct file loading mode (default)
+2026/01/10 21:16:19 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 21:16:19 [Commander-01] TRT: Authenticating...
+2026/01/10 21:16:19 [Reporter-01] Online. Listening for findings...
+2026/01/10 21:16:19 [Reporter-01] Report updated: security_report.md
+2026/01/10 21:16:21 [Commander-01] TRT Auth Failed: failed to authenticate: Post "http://192.168.50.10:8080/dev/generate-token": dial tcp 192.168.50.10:8080: connectex: No connection could be made because the target machine actively refused it.. Stopping Brain.
+2026/01/10 21:31:31 [FileWatcher] Started watching: assets/prompts (debounce: 500ms)
+2026/01/10 21:31:31 [PromptManager] Initialized successfully
+2026/01/10 21:31:31 [Prompts] Direct file loading mode (Phase 2: Hot Reload + Cache + Validation)
+2026/01/10 21:31:31 [Prompts] Warning: RAG mode requested but not implemented yet
+2026/01/10 21:31:31 [Prompts] RAG mode enabled
+2026/01/10 21:31:31 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 21:31:31 [Commander-01] TRT: Authenticating...
+2026/01/10 21:31:31 [Reporter-01] Online. Listening for findings...
+2026/01/10 21:31:31 [Reporter-01] Report updated: security_report.md
+2026/01/10 21:31:31 [Commander-01] TRT Auth Success
+2026/01/10 21:31:31 [Commander-01] Discovered 1 alive agents
+2026/01/10 21:31:31 [Commander-01] Primary Agent: oearzo (SEIZE_DESK)
+2026/01/10 21:31:31 [Commander-01] Thinking...
+2026/01/10 21:31:35 [Commander-01] Thought: Spawn reconnaissance and network security specialists to perform initial enumeration and service mapping of the target IP. Additionally, include a vulnerability assessment specialist to identify and analyze potential security flaws within the discovered services.
+2026/01/10 21:31:35 [Commander-01] Thought: Spawn reconnaissance and network security specialists to perform initial enumeration and service mapping of the target IP. Additionally, include a vulnerability assessment specialist to identify and analyze potential security flaws within the discovered services.
+2026/01/10 21:31:35 [Commander-01] Using TRT Agent oearzo (windows) for ReconSpecialist
+2026/01/10 21:31:35 [Commander-01] Spawning ReconSpecialist...
+2026/01/10 21:31:35 [Commander-01] Subscribed ReconAgent-01 to Event Bus
+2026/01/10 21:31:35 [Commander-01] Sent task to ReconAgent-01: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:31:35 [ReconAgent-01] Received command: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:31:35 [ReconAgent-01] Online. Awaiting reconnaissance tasks for: 192.168.127.128
+2026/01/10 21:31:35 [ReconAgent-01] Executing: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:32:15 [PromptManager] RAG mode enabled, initializing RAG engine...
+2026/01/10 21:32:16 [GeminiEmbedder] Initialized with model: models/text-embedding-004 (dimension: 768)
+2026/01/10 21:32:16 [RAGEngine] Collection 'cai_prompts' already exists
+2026/01/10 21:32:16 [RAGEngine] Initialized successfully (collection: cai_prompts)
+2026/01/10 21:32:16 [PromptManager] RAG engine initialized successfully
+2026/01/10 21:32:16 [FileWatcher] Started watching: assets/prompts (debounce: 500ms)
+2026/01/10 21:32:16 [PromptManager] Initialized successfully
+2026/01/10 21:32:16 [Prompts] RAG mode enabled (Qdrant vector search)
+2026/01/10 21:32:16 [Prompts] RAG mode enabled
+2026/01/10 21:32:16 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 21:32:16 [Commander-01] TRT: Authenticating...
+2026/01/10 21:32:16 [Reporter-01] Online. Listening for findings...
+2026/01/10 21:32:16 [Reporter-01] Report updated: security_report.md
+2026/01/10 21:32:16 [Commander-01] TRT Auth Success
+2026/01/10 21:32:16 [Commander-01] Discovered 1 alive agents
+2026/01/10 21:32:16 [Commander-01] Primary Agent: oearzo (SEIZE_DESK)
+2026/01/10 21:32:16 [Prompts] Failed to format prompt initial: missing variables: [html_content], using legacy
+2026/01/10 21:32:16 [Commander-01] Thinking...
+2026/01/10 21:32:19 [Commander-01] Thought: Spawn reconnaissance and network security specialists to perform initial scanning and service enumeration on the target IP. These specialists will identify open ports and potential vulnerabilities to guide the next phases of the assessment.
+2026/01/10 21:32:19 [Commander-01] Thought: Spawn reconnaissance and network security specialists to perform initial scanning and service enumeration on the target IP. These specialists will identify open ports and potential vulnerabilities to guide the next phases of the assessment.
+2026/01/10 21:32:19 [Commander-01] Using TRT Agent oearzo (windows) for ReconSpecialist
+2026/01/10 21:32:19 [Commander-01] Spawning ReconSpecialist...
+2026/01/10 21:32:19 [Commander-01] Subscribed ReconAgent-01 to Event Bus
+2026/01/10 21:32:19 [Commander-01] Sent task to ReconAgent-01: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:32:19 [ReconAgent-01] Online. Awaiting reconnaissance tasks for: 192.168.127.128
+2026/01/10 21:32:19 [ReconAgent-01] Received command: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:32:19 [ReconAgent-01] Executing: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:32:19 [Prompts] Failed to format prompt decision: missing variables: [cmd_output], using legacy
+2026/01/10 21:33:59 [PromptManager] RAG mode enabled, initializing RAG engine...
+2026/01/10 21:33:59 [GeminiEmbedder] Initialized with model: models/text-embedding-004 (dimension: 768)
+2026/01/10 21:33:59 [RAGEngine] Collection 'cai_prompts' already exists
+2026/01/10 21:33:59 [RAGEngine] Initialized successfully (collection: cai_prompts)
+2026/01/10 21:33:59 [PromptManager] RAG engine initialized successfully
+2026/01/10 21:33:59 [FileWatcher] Started watching: assets/prompts (debounce: 500ms)
+2026/01/10 21:33:59 [PromptManager] Initialized successfully
+2026/01/10 21:33:59 [Prompts] RAG mode enabled (Qdrant vector search)
+2026/01/10 21:33:59 [Prompts] RAG mode enabled
+2026/01/10 21:33:59 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 21:33:59 [Commander-01] TRT: Authenticating...
+2026/01/10 21:33:59 [Reporter-01] Online. Listening for findings...
+2026/01/10 21:33:59 [Reporter-01] Report updated: security_report.md
+2026/01/10 21:33:59 [Commander-01] TRT Auth Success
+2026/01/10 21:33:59 [Commander-01] Discovered 1 alive agents
+2026/01/10 21:33:59 [Commander-01] Primary Agent: oearzo (SEIZE_DESK)
+2026/01/10 21:33:59 [Commander-01] Thinking...
+2026/01/10 21:34:02 [Commander-01] Thought: Spawn reconnaissance and network security specialists to begin mapping the attack surface and identifying open services on the target. These specialists will perform initial scanning and enumeration to guide subsequent assessment phases.
+2026/01/10 21:34:02 [Commander-01] Thought: Spawn reconnaissance and network security specialists to begin mapping the attack surface and identifying open services on the target. These specialists will perform initial scanning and enumeration to guide subsequent assessment phases.
+2026/01/10 21:34:02 [Commander-01] Using TRT Agent oearzo (windows) for ReconSpecialist
+2026/01/10 21:34:02 [Commander-01] Spawning ReconSpecialist...
+2026/01/10 21:34:02 [Commander-01] Subscribed ReconAgent-01 to Event Bus
+2026/01/10 21:34:02 [Commander-01] Sent task to ReconAgent-01: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:34:02 [ReconAgent-01] Online. Awaiting reconnaissance tasks for: 192.168.127.128
+2026/01/10 21:34:02 [ReconAgent-01] Received command: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:34:02 [ReconAgent-01] Executing: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:34:33 [FileWatcher] Started watching: assets/prompts (debounce: 500ms)
+2026/01/10 21:34:33 [PromptManager] Initialized successfully
+2026/01/10 21:34:33 [Prompts] Direct file loading mode (default)
+2026/01/10 21:34:33 [Prompts] Direct file loading mode (default)
+2026/01/10 21:34:33 [Commander-01] Online. Target: 192.168.127.128
+2026/01/10 21:34:33 [Commander-01] TRT: Authenticating...
+2026/01/10 21:34:33 [Reporter-01] Online. Listening for findings...
+2026/01/10 21:34:33 [Reporter-01] Report updated: security_report.md
+2026/01/10 21:34:33 [Commander-01] TRT Auth Success
+2026/01/10 21:34:33 [Commander-01] Discovered 1 alive agents
+2026/01/10 21:34:33 [Commander-01] Primary Agent: oearzo (SEIZE_DESK)
+2026/01/10 21:34:33 [Commander-01] Thinking...
+2026/01/10 21:34:35 [Commander-01] Thought: Spawn reconnaissance and network security specialists to begin port scanning and service identification on the target host. These specialists will establish the attack surface and identify potential vulnerabilities for further analysis.
+2026/01/10 21:34:35 [Commander-01] Thought: Spawn reconnaissance and network security specialists to begin port scanning and service identification on the target host. These specialists will establish the attack surface and identify potential vulnerabilities for further analysis.
+2026/01/10 21:34:35 [Commander-01] Using TRT Agent oearzo (windows) for ReconSpecialist
+2026/01/10 21:34:35 [Commander-01] Spawning ReconSpecialist...
+2026/01/10 21:34:35 [Commander-01] Subscribed ReconAgent-01 to Event Bus
+2026/01/10 21:34:35 [Commander-01] Sent task to ReconAgent-01: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:34:35 [ReconAgent-01] Received command: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:34:35 [ReconAgent-01] Online. Awaiting reconnaissance tasks for: 192.168.127.128
+2026/01/10 21:34:35 [ReconAgent-01] Executing: Perform initial reconnaissance on 192.168.127.128
+2026/01/10 21:34:37 [ReconAgent-01] LLM suggests: nmap 192.168.127.0/24
+2026/01/10 21:34:37 [ReconAgent-01] Running tool on target: 192.168.127.0/24 (hostname: 192.168.127.0/24)

@@ -1,0 +1,5 @@
+CONTEXT: Authorized test on '{{target}}'.
+Task: {{task}}
+INSTRUCTION: We need to discover all assets in the network.
+1. Identify the /24 network range of the target IP (e.g., 192.168.50.10 -> 192.168.50.0/24).
+2. Reply with 'nmap <network_range>'. Example: 'nmap 192.168.50.0/24'.

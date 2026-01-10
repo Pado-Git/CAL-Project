@@ -1,0 +1,16 @@
+{
+  "extract": {
+    "file": "verification/extract.txt",
+    "version": "1.0.0",
+    "variables": ["report"],
+    "output_format": "json",
+    "tags": ["verification", "extraction", "json"]
+  },
+  "platform_detect": {
+    "file": "verification/platform_detect.txt",
+    "version": "1.0.0",
+    "variables": ["cmd_output"],
+    "output_format": "json",
+    "tags": ["verification", "platform", "os-detection", "json"]
+  }
+}

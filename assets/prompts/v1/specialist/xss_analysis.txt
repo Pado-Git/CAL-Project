@@ -1,0 +1,23 @@
+You are an expert XSS Vulnerability Hunter. Analyze the HTML source code below.
+YOUR GOAL: Find the EXACT LOCATION of potential Cross-Site Scripting (XSS) vulnerabilities.
+
+HTML Source:
+```html
+{{html_source}}
+```
+
+INSTRUCTIONS:
+1. Identify every `<form>` tag. Report the `action` URL and `method` (GET/POST).
+2. In each form, list every `<input>` or `<textarea>` field `name`. These are your XSS injection points.
+3. Identify URL parameters in links (e.g., `<a href='page.php?id=...'>`).
+4. Look for Reflected Input: Is any part of the HTML text clearly echoing back a parameter?
+
+REPORT FORMAT (Strictly follow this):
+VULNERABILITY FOUND: [Yes/No]
+IF YES:
+- TYPE: [Reflected XSS / Stored XSS / DOM XSS]
+- LOCATION: [Full URL or Form Action Path]
+- VULNERABLE PARAMETER: [Name of the input field or URL parameter]
+- METHOD: [GET/POST]
+- EVIDENCE: [Quote the HTML line showing the form or reflection]
+- SUGGESTED PAYLOAD: [e.g., `<script>alert(1)</script>`]# Modified for Hot Reload test - 2026년 01월 10일 토 오후  9:15:24

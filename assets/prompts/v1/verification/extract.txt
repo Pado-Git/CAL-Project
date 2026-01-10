@@ -1,0 +1,6 @@
+Extract vulnerability details from this report:
+
+{{report}}
+
+TASK: Identify the type (XSS or SQLi), content location (URL), and payload.
+Reply with JSON ONLY: {"type": "XSS"|"SQLi", "url": "...", "payload": "..."}

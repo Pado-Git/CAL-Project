@@ -1,0 +1,9 @@
+{
+  "decision": {
+    "file": "recon/decision.txt",
+    "version": "1.0.0",
+    "variables": ["target", "task"],
+    "output_format": "text",
+    "tags": ["recon", "reconnaissance", "network"]
+  }
+}
