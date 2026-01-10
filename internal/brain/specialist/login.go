@@ -5,11 +5,13 @@ import (
 	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
+	"cal-project/internal/core/utils"
 	"cal-project/internal/hands/tools"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 )
@@ -57,7 +59,15 @@ func (l *LoginSpecialist) OnEvent(event bus.Event) {
 	// Only process commands directed to this agent
 	if event.Type == bus.Command && event.ToAgent == l.id {
 		log.Printf("[%s] Received command: %v\n", l.id, event.Payload)
-		go l.executeTask(event)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[%s] PANIC in executeTask: %v\n%s\n", l.id, rec, debug.Stack())
+					l.reportError(event.FromAgent, fmt.Errorf("task panicked: %v", rec))
+				}
+			}()
+			l.executeTask(event)
+		}()
 	}
 }
 
@@ -159,10 +169,12 @@ func (l *LoginSpecialist) extractLoginForm(htmlContent string) map[string]string
 		PasswordField string `json:"password_field"`
 	}
 
-	if err := json.Unmarshal([]byte(analysis), &result); err != nil {
-		log.Printf("[%s] Failed to parse LLM JSON: %v\n", l.id, err)
-		log.Printf("[%s] Raw LLM response: %s\n", l.id, analysis)
-		return nil
+	if err := utils.ParseLLMJSON(analysis, &result); err != nil {
+		log.Printf("[%s] ❌ Failed to parse JSON: %v\n", l.id, err)
+
+		// Fallback: regex extraction
+		log.Printf("[%s] Using regex fallback\n", l.id)
+		return l.fallbackFormExtraction(htmlContent)
 	}
 
 	log.Printf("[%s] Form detected: action=%s, method=%s, username_field=%s, password_field=%s\n",
@@ -329,12 +341,23 @@ func (l *LoginSpecialist) getBaseURL() string {
 	return l.loginURL
 }
 
-// maskCookie masks cookie value for logging
+// maskCookie masks sensitive cookie data for secure logging
+// Exposes only first 4 chars + last 4 chars for debugging
 func (l *LoginSpecialist) maskCookie(cookie string) string {
-	if len(cookie) > 20 {
-		return cookie[:10] + "***" + cookie[len(cookie)-5:]
+	const (
+		prefixLen = 4
+		suffixLen = 4
+		minLen    = prefixLen + suffixLen + 3 // 3 for "***"
+	)
+
+	if len(cookie) <= minLen {
+		if len(cookie) > 1 {
+			return cookie[:1] + "***"
+		}
+		return "***"
 	}
-	return cookie[:5] + "***"
+
+	return cookie[:prefixLen] + "***" + cookie[len(cookie)-suffixLen:]
 }
 
 // maskPostData masks sensitive data for logging
@@ -379,4 +402,46 @@ func (l *LoginSpecialist) reportError(toAgent string, err error) {
 		Payload:   err.Error(),
 	}
 	l.bus.Publish(toAgent, event)
+}
+
+// fallbackFormExtraction uses regex when LLM parsing fails
+func (l *LoginSpecialist) fallbackFormExtraction(htmlContent string) map[string]string {
+	formPattern := regexp.MustCompile(`(?i)<form[^>]*action=["']?([^"'\s>]+)["']?[^>]*method=["']?([^"'\s>]+)["']?`)
+	formMatch := formPattern.FindStringSubmatch(htmlContent)
+
+	if len(formMatch) < 3 {
+		log.Printf("[%s] Fallback: No form found\n", l.id)
+		return nil
+	}
+
+	action := formMatch[1]
+	method := strings.ToUpper(formMatch[2])
+
+	usernamePattern := regexp.MustCompile(`(?i)<input[^>]*name=["']?([^"'\s>]*(?:user|email|login)[^"'\s>]*)["']?`)
+	passwordPattern := regexp.MustCompile(`(?i)<input[^>]*name=["']?([^"'\s>]*pass[^"'\s>]*)["']?`)
+
+	usernameMatch := usernamePattern.FindStringSubmatch(htmlContent)
+	passwordMatch := passwordPattern.FindStringSubmatch(htmlContent)
+
+	if len(usernameMatch) < 2 || len(passwordMatch) < 2 {
+		log.Printf("[%s] Fallback: No username/password fields\n", l.id)
+		return nil
+	}
+
+	formData := map[string]string{
+		"action": action,
+		"method": method,
+	}
+
+	if email, exists := l.credentials["email"]; exists {
+		formData[usernameMatch[1]] = email
+	}
+	if password, exists := l.credentials["password"]; exists {
+		formData[passwordMatch[1]] = password
+	}
+
+	log.Printf("[%s] Fallback extracted: action=%s, method=%s, username=%s, password=%s\n",
+		l.id, action, method, usernameMatch[1], passwordMatch[1])
+
+	return formData
 }

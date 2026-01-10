@@ -6,6 +6,7 @@ import (
 	"cal-project/internal/brain/specialist"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
+	"cal-project/internal/core/utils"
 	"cal-project/internal/hands/docker"
 	"cal-project/internal/hands/tools"
 	"cal-project/internal/hands/trt"
@@ -40,7 +41,13 @@ type Commander struct {
 	bus           bus.Bus
 	brain         llm.LLM
 	ctx           context.Context
+
+	// Target configuration
 	target        string
+	mode          string // "single" or "network"
+	email         string // Login credentials
+	password      string // Login credentials
+
 	trtClient     *trt.Client
 	specialists   map[string]agent.Agent
 	counters      map[string]int
@@ -50,13 +57,16 @@ type Commander struct {
 }
 
 // NewCommander creates a new Commander agent
-func NewCommander(ctx context.Context, eventBus bus.Bus, llmClient llm.LLM, targetURL string, trtClient *trt.Client) *Commander {
+func NewCommander(ctx context.Context, eventBus bus.Bus, llmClient llm.LLM, targetURL string, mode string, email string, password string, trtClient *trt.Client) *Commander {
 	return &Commander{
 		id:          "Commander-01",
 		bus:         eventBus,
 		brain:       llmClient,
 		ctx:         ctx,
 		target:      targetURL,
+		mode:        mode,
+		email:       email,
+		password:    password,
 		trtClient:   trtClient,
 		specialists: make(map[string]agent.Agent),
 		counters:    make(map[string]int),
@@ -73,14 +83,18 @@ func (c *Commander) Type() agent.AgentType {
 }
 
 func (c *Commander) Run() error {
-	log.Printf("[%s] Online. Target: %s\n", c.id, c.target)
+	log.Printf("[%s] Online. Target: %s | Mode: %s\n", c.id, c.target, c.mode)
 
-	// TRT Initialization
+	// TRT Initialization (optional, only warn on failure in single mode)
 	if c.trtClient != nil {
 		log.Printf("[%s] TRT: Authenticating...\n", c.id)
 		if err := c.trtClient.Authenticate(); err != nil {
-			log.Printf("[%s] TRT Auth Failed: %v. Stopping Brain.\n", c.id, err)
-			return fmt.Errorf("failed to authenticate with TRT: %w", err)
+			if c.mode == "single" {
+				log.Printf("[%s] ⚠️ TRT Auth Failed (Single Mode): %v. Continuing without TRT.\n", c.id, err)
+			} else {
+				log.Printf("[%s] TRT Auth Failed: %v. Stopping Brain.\n", c.id, err)
+				return fmt.Errorf("failed to authenticate with TRT: %w", err)
+			}
 		} else {
 			log.Printf("[%s] TRT Auth Success\n", c.id)
 			agents, err := c.trtClient.GetAliveAgents()
@@ -94,6 +108,31 @@ func (c *Commander) Run() error {
 			}
 		}
 	}
+
+	// Execute mode-specific logic
+	switch c.mode {
+	case "single":
+		return c.runSingleTargetMode()
+	case "network":
+		return c.runNetworkMode()
+	default:
+		return fmt.Errorf("unknown mode: %s", c.mode)
+	}
+}
+
+// runSingleTargetMode directly spawns WebSpecialist (skip ReconSpecialist)
+func (c *Commander) runSingleTargetMode() error {
+	log.Printf("[%s] SINGLE TARGET MODE: Directly attacking %s\n", c.id, c.target)
+
+	// Spawn WebSpecialist directly for the target URL
+	c.spawnWebSpecialistDirect(c.target)
+
+	return nil
+}
+
+// runNetworkMode uses existing ReconSpecialist flow
+func (c *Commander) runNetworkMode() error {
+	log.Printf("[%s] NETWORK MODE: Starting reconnaissance on %s\n", c.id, c.target)
 
 	// Initial thought with authorized testing context
 	initialPrompt := prompts.GetCommanderInitial(c.target)
@@ -173,9 +212,22 @@ func (c *Commander) analyzeObservation(fromAgent string, observation string) {
 		loginURL := c.extractLoginURL(observation)
 		if loginURL != "" {
 			log.Printf("[%s] 🔐 Login form detected, spawning LoginSpecialist\n", c.id)
+
+			// Use credentials from Commander (set via CLI or .env)
+			email := c.email
+			if email == "" {
+				email = "test@test.net" // Backward compatibility
+				log.Printf("[%s] ⚠️ No credentials configured, using default\n", c.id)
+			}
+
+			password := c.password
+			if password == "" {
+				password = "1234" // Backward compatibility
+			}
+
 			credentials := map[string]string{
-				"email":    "test@test.net",
-				"password": "1234",
+				"email":    email,
+				"password": password,
 			}
 			go c.spawnLoginSpecialist(loginURL, credentials)
 		}
@@ -248,10 +300,16 @@ func (c *Commander) parseVulnerabilityJSON(fromAgent string, observation string)
 	log.Printf("[%s] 📋 Parsing vulnerability JSON from %s\n", c.id, fromAgent)
 
 	var report VulnerabilityReport
-	if err := json.Unmarshal([]byte(jsonStr), &report); err != nil {
-		log.Printf("[%s] Failed to parse vulnerability JSON: %v\n", c.id, err)
-		log.Printf("[%s] Raw JSON: %s\n", c.id, jsonStr)
-		return
+	if err := utils.ParseLLMJSON(jsonStr, &report); err != nil {
+		log.Printf("[%s] ❌ Failed to parse JSON: %v\n", c.id, err)
+		log.Printf("[%s] Raw (first 300 chars): %s\n", c.id, truncate(jsonStr, 300))
+
+		// Try parsing entire observation as fallback
+		log.Printf("[%s] Attempting fallback: parsing full observation\n", c.id)
+		if err2 := utils.ParseLLMJSON(observation, &report); err2 != nil {
+			log.Printf("[%s] ❌ Complete parsing failure\n", c.id)
+			return
+		}
 	}
 
 	// Extract base URL from the report's target (need to get it from WebSpecialist's observation)
@@ -471,17 +529,77 @@ func (c *Commander) spawnReconSpecialist() {
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, reconID)
 
 	// Start the specialist
-	go func() {
+	utils.SafeGo(reconID, func() {
 		if err := reconAgent.Run(); err != nil {
 			log.Printf("[%s] Specialist %s crashed: %v\n", c.id, reconID, err)
 		}
-	}()
+	})
 
 	// Send initial task
 	c.sendTaskToSpecialist(reconID, "Perform initial reconnaissance on "+c.target)
 }
 
 // spawnWebSpecialist creates and registers a new WebSpecialist
+// spawnWebSpecialistDirect creates WebSpecialist for a specific URL (single target mode)
+// This bypasses ReconSpecialist and directly attacks the target URL
+func (c *Commander) spawnWebSpecialistDirect(targetURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Generate unique ID
+	c.counters["WebAgent"]++
+	count := c.counters["WebAgent"]
+	webID := fmt.Sprintf("WebAgent-%02d", count)
+
+	log.Printf("[%s] Spawning WebSpecialist for direct URL attack: %s\n", c.id, targetURL)
+
+	// Determine Executor (same logic as spawnWebSpecialist)
+	var executor tools.ToolExecutor
+	var err error
+
+	// Try TRT first if client exists
+	if c.trtClient != nil {
+		agents, trtErr := c.trtClient.GetAliveAgents()
+		if trtErr == nil && len(agents) > 0 {
+			agent := agents[0] // Pick first for now
+			log.Printf("[%s] Using TRT Agent %s (%s) for WebSpecialist\n", c.id, agent.Paw, agent.Platform)
+			executor = trt.NewRemoteExecutor(c.trtClient, agent.Paw, agent.Platform)
+		}
+	}
+
+	// Fallback to Docker if TRT not available or failed
+	if executor == nil {
+		log.Printf("[%s] TRT unavailable, falling back to Docker Executor for WebSpecialist\n", c.id)
+		executor, err = docker.NewExecutor(webID)
+		if err != nil {
+			log.Printf("[%s] Failed to create Docker executor: %v\n", c.id, err)
+		}
+	}
+
+	// Create new specialist
+	webAgent := specialist.NewWebSpecialist(c.ctx, webID, c.bus, c.brain, targetURL, executor)
+
+	// Register specialist
+	c.specialists[webID] = webAgent
+
+	// Report engagement to Reporter
+	c.reportEngagement(targetURL)
+
+	// Subscribe to Event Bus
+	c.bus.Subscribe(webID, webAgent.OnEvent)
+
+	// Start agent
+	utils.SafeGo(webID, func() {
+		if err := webAgent.Run(); err != nil {
+			log.Printf("[%s] Specialist %s crashed: %v\n", c.id, webID, err)
+		}
+	})
+
+	// Send initial command
+	task := fmt.Sprintf("Perform web reconnaissance on %s", targetURL)
+	c.sendTaskToSpecialist(webID, task)
+}
+
 func (c *Commander) spawnWebSpecialist(targetURL string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -538,11 +656,11 @@ func (c *Commander) spawnWebSpecialist(targetURL string) {
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, webID)
 
 	// Start the specialist
-	go func() {
+	utils.SafeGo(webID, func() {
 		if err := webAgent.Run(); err != nil {
 			log.Printf("[%s] Specialist %s crashed: %v\n", c.id, webID, err)
 		}
-	}()
+	})
 
 	// Send initial task
 	c.sendTaskToSpecialist(webID, "Perform web reconnaissance on "+targetURL)
@@ -587,11 +705,11 @@ func (c *Commander) spawnVerificationSpecialist(vulnReport string) {
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, verifyID)
 
 	// Start the specialist
-	go func() {
+	utils.SafeGo(verifyID, func() {
 		if err := verifyAgent.Run(); err != nil {
 			log.Printf("[%s] Specialist %s crashed: %v\n", c.id, verifyID, err)
 		}
-	}()
+	})
 
 	// Send verification task
 	c.sendTaskToSpecialist(verifyID, vulnReport)
@@ -662,11 +780,11 @@ func (c *Commander) spawnXSSSpecialist(targetURL string) {
 
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, xssID)
 
-	go func() {
+	utils.SafeGo(xssID, func() {
 		if err := xssAgent.Run(); err != nil {
 			log.Printf("[%s] XSSSpecialist crashed: %v\n", c.id, err)
 		}
-	}()
+	})
 
 	c.sendTaskToSpecialist(xssID, "Hunt for XSS vulnerabilities on "+targetURL)
 }
@@ -696,11 +814,11 @@ func (c *Commander) spawnSQLiSpecialist(targetURL string) {
 
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, sqliID)
 
-	go func() {
+	utils.SafeGo(sqliID, func() {
 		if err := sqliAgent.Run(); err != nil {
 			log.Printf("[%s] SQLiSpecialist crashed: %v\n", c.id, err)
 		}
-	}()
+	})
 
 	c.sendTaskToSpecialist(sqliID, "Hunt for SQL injection on "+targetURL)
 }
@@ -730,11 +848,11 @@ func (c *Commander) spawnPathTraversalSpecialist(targetURL string) {
 
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, ptID)
 
-	go func() {
+	utils.SafeGo(ptID, func() {
 		if err := ptAgent.Run(); err != nil {
 			log.Printf("[%s] PathTraversalSpecialist crashed: %v\n", c.id, err)
 		}
-	}()
+	})
 
 	c.sendTaskToSpecialist(ptID, "Hunt for Path Traversal vulnerabilities on "+targetURL)
 }
@@ -764,11 +882,11 @@ func (c *Commander) spawnFileUploadSpecialist(targetURL string) {
 
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, fuID)
 
-	go func() {
+	utils.SafeGo(fuID, func() {
 		if err := fuAgent.Run(); err != nil {
 			log.Printf("[%s] FileUploadSpecialist crashed: %v\n", c.id, err)
 		}
-	}()
+	})
 
 	c.sendTaskToSpecialist(fuID, "Hunt for File Upload vulnerabilities on "+targetURL)
 }
@@ -837,11 +955,11 @@ func (c *Commander) spawnCommandInjectionSpecialist(targetURL string, parameter 
 
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, cmdiID)
 
-	go func() {
+	utils.SafeGo(cmdiID, func() {
 		if err := cmdiAgent.Run(); err != nil {
 			log.Printf("[%s] CommandInjectionSpecialist crashed: %v\n", c.id, err)
 		}
-	}()
+	})
 
 	// P1: Include parameter in task description for RCE verification
 	taskDesc := fmt.Sprintf("Deploy CallistoAgent via agent %s (target context: %s?%s=test)", agent.Paw, targetURL, parameter)
@@ -879,11 +997,11 @@ func (c *Commander) spawnAgentDeploymentSpecialist(agentPaw string, platform str
 
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, cmdiID)
 
-	go func() {
+	utils.SafeGo(cmdiID, func() {
 		if err := cmdiAgent.Run(); err != nil {
 			log.Printf("[%s] AgentDeploymentSpecialist crashed: %v\n", c.id, err)
 		}
-	}()
+	})
 
 	c.sendTaskToSpecialist(cmdiID, fmt.Sprintf("Deploy CallistoAgent via agent %s", agentPaw))
 }
@@ -958,10 +1076,7 @@ func (c *Commander) handleSessionCookie(observation string) {
 	c.mu.Unlock()
 
 	// Mask cookie for logging
-	maskedCookie := cookie
-	if len(cookie) > 20 {
-		maskedCookie = cookie[:10] + "***" + cookie[len(cookie)-5:]
-	}
+	maskedCookie := maskCookie(cookie)
 
 	log.Printf("[%s] 🍪 Session Cookie Acquired: %s\n", c.id, maskedCookie)
 
@@ -1052,11 +1167,11 @@ func (c *Commander) spawnCrawlerSpecialist(baseURL string) {
 
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, crawlerID)
 
-	go func() {
+	utils.SafeGo(crawlerID, func() {
 		if err := crawlerAgent.Run(); err != nil {
 			log.Printf("[%s] CrawlerSpecialist crashed: %v\n", c.id, err)
 		}
-	}()
+	})
 
 	c.sendTaskToSpecialist(crawlerID, "Crawl entire website starting from "+baseURL)
 }
@@ -1083,11 +1198,38 @@ func (c *Commander) spawnLoginSpecialist(loginURL string, credentials map[string
 
 	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, loginID)
 
-	go func() {
+	utils.SafeGo(loginID, func() {
 		if err := loginAgent.Run(); err != nil {
 			log.Printf("[%s] LoginSpecialist crashed: %v\n", c.id, err)
 		}
-	}()
+	})
 
 	c.sendTaskToSpecialist(loginID, "Attempt login on "+loginURL)
+}
+
+// maskCookie masks sensitive cookie data for secure logging
+// Exposes only first 4 chars + last 4 chars for debugging
+func maskCookie(cookie string) string {
+	const (
+		prefixLen = 4
+		suffixLen = 4
+		minLen    = prefixLen + suffixLen + 3 // 3 for "***"
+	)
+
+	if len(cookie) <= minLen {
+		if len(cookie) > 1 {
+			return cookie[:1] + "***"
+		}
+		return "***"
+	}
+
+	return cookie[:prefixLen] + "***" + cookie[len(cookie)-suffixLen:]
+}
+
+// truncate limits string length for logging
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

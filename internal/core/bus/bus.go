@@ -3,6 +3,8 @@ package bus
 import (
 	"errors"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -113,8 +115,16 @@ func (b *MemoryBus) dispatch(topic string, event Event) {
 	b.mu.RUnlock()
 
 	for _, h := range handlers {
+		handler := h // capture for closure
 		// Run handlers in their own goroutine to prevent blocking the bus?
 		// For safety in this architecture, yes.
-		go h(event)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[Bus] PANIC in event handler: %v\n%s\n", r, debug.Stack())
+				}
+			}()
+			handler(event)
+		}()
 	}
 }

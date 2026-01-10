@@ -23,9 +23,18 @@ import (
 )
 
 func main() {
-	// CLI Flags
-	enableRAG := flag.Bool("enable-rag", false, "Enable RAG mode for prompt management")
-	ragShort := flag.Bool("rag", false, "Enable RAG mode (short flag)")
+	// CLI Flags for targeting
+	var (
+		enableRAG  = flag.Bool("enable-rag", false, "Enable RAG mode for prompt management")
+		ragShort   = flag.Bool("rag", false, "Enable RAG mode (short flag)")
+
+		// NEW: Targeting flags
+		targetMode = flag.String("mode", "network", "Execution mode: 'single' or 'network'")
+		targetURL  = flag.String("url", "", "Target URL (overrides .env TARGET_URL)")
+		loginEmail = flag.String("email", "", "Login email (overrides .env LOGIN_EMAIL)")
+		loginPass  = flag.String("password", "", "Login password (overrides .env LOGIN_PASSWORD)")
+	)
+
 	flag.Parse()
 
 	// Setup Multi-writer logging (Console + File)
@@ -96,16 +105,43 @@ func main() {
 	trtClient := trt.NewClient()
 
 	// 5. Initialize Commander Agent
-	targetURL := os.Getenv("TARGET_URL")
-	if targetURL == "" {
-		targetURL = "http://example.com" // Default fallback
+	// Load target config (CLI > .env > default)
+	finalURL := *targetURL
+	if finalURL == "" {
+		finalURL = os.Getenv("TARGET_URL")
+		if finalURL == "" {
+			finalURL = "http://example.com" // Default fallback
+		}
 	}
-	// Now passing trtClient to Commander
-	cmdr := commander.NewCommander(ctx, eventBus, llmClient, targetURL, trtClient)
+
+	finalEmail := *loginEmail
+	if finalEmail == "" {
+		finalEmail = os.Getenv("LOGIN_EMAIL")
+	}
+
+	finalPassword := *loginPass
+	if finalPassword == "" {
+		finalPassword = os.Getenv("LOGIN_PASSWORD")
+	}
+
+	finalMode := *targetMode
+	if finalMode != "single" && finalMode != "network" {
+		log.Fatalf("Invalid mode: %s (must be 'single' or 'network')", finalMode)
+	}
+
+	log.Printf("========================================")
+	log.Printf("Execution Mode: %s", finalMode)
+	log.Printf("Target URL: %s", finalURL)
+	if finalEmail != "" {
+		log.Printf("Credentials: %s / ********", finalEmail)
+	}
+	log.Printf("========================================")
+
+	cmdr := commander.NewCommander(ctx, eventBus, llmClient, finalURL, finalMode, finalEmail, finalPassword, trtClient)
 	orch.RegisterAgent(cmdr)
 
 	// 6. Initialize Reporter Agent
-	reporterAgent := reporter.NewReporter(eventBus, targetURL)
+	reporterAgent := reporter.NewReporter(eventBus, finalURL)
 	orch.RegisterAgent(reporterAgent)
 
 	// 7. Start System

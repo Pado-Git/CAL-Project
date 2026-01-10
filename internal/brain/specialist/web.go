@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 )
@@ -55,7 +56,15 @@ func (w *WebSpecialist) OnEvent(event bus.Event) {
 	// Only process commands directed to this agent
 	if event.Type == bus.Command && event.ToAgent == w.id {
 		log.Printf("[%s] Received command: %v\n", w.id, event.Payload)
-		go w.executeTask(event)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[%s] PANIC in executeTask: %v\n%s\n", w.id, rec, debug.Stack())
+					w.reportError(event.FromAgent, fmt.Errorf("task panicked: %v", rec))
+				}
+			}()
+			w.executeTask(event)
+		}()
 	}
 }
 

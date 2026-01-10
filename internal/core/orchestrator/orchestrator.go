@@ -4,6 +4,8 @@ import (
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
 	"fmt"
+	"log"
+	"runtime/debug"
 	"sync"
 )
 
@@ -57,11 +59,17 @@ func (o *Orchestrator) Start() {
 	defer o.mu.RUnlock()
 
 	for _, a := range o.Agents {
-		go func(agent agent.Agent) {
+		agent := a // capture for closure
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[Orchestrator] PANIC in agent %s: %v\n%s\n", agent.ID(), r, debug.Stack())
+				}
+			}()
 			if err := agent.Run(); err != nil {
 				fmt.Printf("[Orchestrator] Agent %s crashed: %v\n", agent.ID(), err)
 			}
-		}(a)
+		}()
 	}
 }
 

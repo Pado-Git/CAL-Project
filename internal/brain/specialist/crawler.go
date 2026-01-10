@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,7 +70,15 @@ func (c *CrawlerSpecialist) OnEvent(event bus.Event) {
 	// Only process commands directed to this agent
 	if event.Type == bus.Command && event.ToAgent == c.id {
 		log.Printf("[%s] Received command: %v\n", c.id, event.Payload)
-		go c.executeTask(event)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[%s] PANIC in executeTask: %v\n%s\n", c.id, rec, debug.Stack())
+					c.reportError(event.FromAgent, fmt.Errorf("task panicked: %v", rec))
+				}
+			}()
+			c.executeTask(event)
+		}()
 	}
 }
 

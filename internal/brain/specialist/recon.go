@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 )
@@ -60,7 +61,15 @@ func (r *ReconSpecialist) OnEvent(event bus.Event) {
 	// Only process commands directed to this agent
 	if event.Type == bus.Command && event.ToAgent == r.id {
 		log.Printf("[%s] Received command: %v\n", r.id, event.Payload)
-		go r.executeTask(event)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[%s] PANIC in executeTask: %v\n%s\n", r.id, rec, debug.Stack())
+					r.reportError(event.FromAgent, fmt.Errorf("task panicked: %v", rec))
+				}
+			}()
+			r.executeTask(event)
+		}()
 	}
 }
 

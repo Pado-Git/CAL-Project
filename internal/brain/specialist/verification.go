@@ -5,11 +5,14 @@ import (
 	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
+	"cal-project/internal/core/utils"
 	"cal-project/internal/hands/tools"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 )
@@ -73,7 +76,15 @@ func (v *VerificationSpecialist) Run() error {
 func (v *VerificationSpecialist) OnEvent(event bus.Event) {
 	if event.Type == bus.Command && event.ToAgent == v.id {
 		log.Printf("[%s] Received verification request\n", v.id)
-		go v.executeVerification(event)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[%s] PANIC in executeVerification: %v\n%s\n", v.id, rec, debug.Stack())
+					v.reportError(event.FromAgent, fmt.Errorf("verification panicked: %v", rec))
+				}
+			}()
+			v.executeVerification(event)
+		}()
 	}
 }
 
@@ -163,26 +174,23 @@ func (v *VerificationSpecialist) extractVulnerabilityInfo(report string) []VulnI
 		return nil
 	}
 
-	// Parse JSON result from LLM
-	// Clean up potential markdown code blocks
-	infoData := strings.TrimSpace(infoRaw)
-	infoData = strings.ReplaceAll(infoData, "```json", "")
-	infoData = strings.ReplaceAll(infoData, "```", "")
-
-	// Try unmarshalling as an array first (preferred)
+	// Try parsing as array
 	var infoList []VulnInfo
-	if err := json.Unmarshal([]byte(infoData), &infoList); err == nil {
+	if err := utils.ParseLLMJSON(infoRaw, &infoList); err == nil && len(infoList) > 0 {
+		log.Printf("[%s] Parsed %d vulnerabilities\n", v.id, len(infoList))
 		return infoList
 	}
 
-	// If that fails, try unmarshalling as a single object and wrap it
+	// Try parsing as single object
 	var info VulnInfo
-	if err := json.Unmarshal([]byte(infoData), &info); err == nil {
+	if err := utils.ParseLLMJSON(infoRaw, &info); err == nil && info.URL != "" {
+		log.Printf("[%s] Parsed single vulnerability\n", v.id)
 		return []VulnInfo{info}
 	}
 
-	log.Printf("[%s] Failed to parse vulnerability info. Raw Data: %s\n", v.id, infoData)
-	return nil
+	// Fallback: regex extraction
+	log.Printf("[%s] ❌ JSON parsing failed, using regex fallback\n", v.id)
+	return v.fallbackVulnExtraction(report)
 }
 
 func (v *VerificationSpecialist) constructTestURL(info *VulnInfo) string {
@@ -389,6 +397,56 @@ func (v *VerificationSpecialist) reportObservation(toAgent string, observation s
 		Payload:   observation,
 	}
 	v.bus.Publish(toAgent, event)
+}
+
+func (v *VerificationSpecialist) reportError(toAgent string, err error) {
+	msgID := verifyMessageCounter.Add(1)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-err-%d", v.id, msgID),
+		FromAgent: v.id,
+		ToAgent:   toAgent,
+		Type:      bus.Error,
+		Payload:   err.Error(),
+	}
+	v.bus.Publish(toAgent, event)
+}
+
+// fallbackVulnExtraction uses regex when LLM parsing fails
+func (v *VerificationSpecialist) fallbackVulnExtraction(report string) []VulnInfo {
+	var results []VulnInfo
+
+	// Regex patterns
+	locationPattern := regexp.MustCompile(`(?i)(?:LOCATION|URL):\s*(https?://[^\s\n]+)`)
+	payloadPattern := regexp.MustCompile(`(?i)(?:SUGGESTED\s+)?(?:TEST\s+)?PAYLOAD:\s*([^\n]+)`)
+	typePattern := regexp.MustCompile(`(?i)TYPE:\s*(XSS|SQLi|SQL\s*Injection|Path\s*Traversal|Command\s*Injection)`)
+
+	locationMatches := locationPattern.FindAllStringSubmatch(report, -1)
+	payloadMatches := payloadPattern.FindAllStringSubmatch(report, -1)
+	typeMatches := typePattern.FindAllStringSubmatch(report, -1)
+
+	if len(locationMatches) == 0 {
+		log.Printf("[%s] Fallback: No URLs found\n", v.id)
+		return nil
+	}
+
+	for i, locMatch := range locationMatches {
+		info := VulnInfo{URL: locMatch[1]}
+
+		if i < len(typeMatches) {
+			info.Type = strings.TrimSpace(typeMatches[i][1])
+		} else {
+			info.Type = "Unknown"
+		}
+
+		if i < len(payloadMatches) {
+			info.Payload = strings.TrimSpace(payloadMatches[i][1])
+		}
+
+		results = append(results, info)
+	}
+
+	log.Printf("[%s] Fallback found %d vulnerabilities\n", v.id, len(results))
+	return results
 }
 
 func min(a, b int) int {
