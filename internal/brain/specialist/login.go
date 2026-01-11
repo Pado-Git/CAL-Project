@@ -167,6 +167,8 @@ func (l *LoginSpecialist) extractLoginForm(htmlContent string) map[string]string
 		Method        string `json:"method"`
 		UsernameField string `json:"username_field"`
 		PasswordField string `json:"password_field"`
+		CSRFToken     string `json:"csrf_token"`
+		CSRFTokenName string `json:"csrf_token_field"`
 	}
 
 	if err := utils.ParseLLMJSON(analysis, &result); err != nil {
@@ -194,6 +196,12 @@ func (l *LoginSpecialist) extractLoginForm(htmlContent string) map[string]string
 		if password, exists := l.credentials["password"]; exists {
 			formData[result.PasswordField] = password
 		}
+	}
+
+	// Add CSRF token if found
+	if result.CSRFTokenName != "" && result.CSRFToken != "" {
+		formData[result.CSRFTokenName] = result.CSRFToken
+		log.Printf("[%s] CSRF token field included: %s\n", l.id, result.CSRFTokenName)
 	}
 
 	return formData
@@ -253,12 +261,28 @@ func (l *LoginSpecialist) attemptLogin(formData map[string]string) (string, erro
 }
 
 // extractCookie extracts session cookie from Set-Cookie header
+// extractCookie extracts the first cookie (backward compatibility)
 func (l *LoginSpecialist) extractCookie(httpResponse string) string {
+	cookies := l.extractCookies(httpResponse)
+	if len(cookies) == 0 {
+		return ""
+	}
+	// Return first cookie in "name=value" format
+	for name, value := range cookies {
+		return fmt.Sprintf("%s=%s", name, value)
+	}
+	return ""
+}
+
+// extractCookies extracts all cookies from HTTP response
+func (l *LoginSpecialist) extractCookies(httpResponse string) map[string]string {
+	cookies := make(map[string]string)
 	lines := strings.Split(httpResponse, "\n")
+
 	for _, line := range lines {
 		lowerLine := strings.ToLower(line)
 		if strings.HasPrefix(lowerLine, "set-cookie:") {
-			// Extract cookie value - handle both cases
+			// Extract cookie value
 			// Format: Set-Cookie: session=abc123; Path=/; HttpOnly
 			cookieValue := line
 
@@ -275,10 +299,16 @@ func (l *LoginSpecialist) extractCookie(httpResponse string) string {
 			}
 
 			cookieValue = strings.TrimSpace(cookieValue)
-			return cookieValue
+
+			// Parse "name=value"
+			parts := strings.SplitN(cookieValue, "=", 2)
+			if len(parts) == 2 {
+				cookies[parts[0]] = parts[1]
+			}
 		}
 	}
-	return ""
+
+	return cookies
 }
 
 // isLoginSuccessful uses heuristics to verify login success
@@ -438,6 +468,24 @@ func (l *LoginSpecialist) fallbackFormExtraction(htmlContent string) map[string]
 	}
 	if password, exists := l.credentials["password"]; exists {
 		formData[passwordMatch[1]] = password
+	}
+
+	// CSRF token extraction (Hidden input)
+	csrfPattern := regexp.MustCompile(
+		`(?i)<input[^>]*type=["']?hidden["']?[^>]*name=["']?([^"'\s>]*(?:csrf|token)[^"'\s>]*)["']?[^>]*value=["']?([^"'\s>]+)["']?`,
+	)
+	if matches := csrfPattern.FindStringSubmatch(htmlContent); len(matches) >= 3 {
+		formData[matches[1]] = matches[2]
+		log.Printf("[%s] Fallback: CSRF token found: %s\n", l.id, matches[1])
+	}
+
+	// Meta tag CSRF
+	metaCsrfPattern := regexp.MustCompile(
+		`(?i)<meta[^>]*name=["']?csrf-token["']?[^>]*content=["']?([^"'\s>]+)["']?`,
+	)
+	if matches := metaCsrfPattern.FindStringSubmatch(htmlContent); len(matches) >= 2 {
+		formData["csrf_token"] = matches[1]
+		log.Printf("[%s] Fallback: CSRF token found in meta tag\n", l.id)
 	}
 
 	log.Printf("[%s] Fallback extracted: action=%s, method=%s, username=%s, password=%s\n",

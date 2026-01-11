@@ -20,8 +20,12 @@ INSTRUCTIONS:
      - Common names: name="email", name="username", name="user", name="login", name="id"
    - Find the <input type="password"> for password field
      - Common names: name="password", name="pass", name="pwd", name="passwd"
-4. Return the ACTUAL field names from the HTML, NOT mapped or normalized names
-5. If multiple login forms exist, return the first one found
+4. Check for CSRF tokens (important for form submission):
+   - Look for: <input type="hidden" name="csrf_token|_token|token|authenticity_token">
+   - Look for: <meta name="csrf-token" content="...">
+   - If found, extract both the field name and value
+5. Return the ACTUAL field names from the HTML, NOT mapped or normalized names
+6. If multiple login forms exist, return the first one found
 
 EXAMPLES:
 - If HTML has: <input name="email"> and <input name="password" type="password">
@@ -38,10 +42,12 @@ OUTPUT FORMAT (JSON only, no markdown):
   "action": "/login",
   "method": "POST",
   "username_field": "actual_name_from_html",
-  "password_field": "actual_name_from_html"
+  "password_field": "actual_name_from_html",
+  "csrf_token": "token_value_if_found",
+  "csrf_token_field": "token_field_name_if_found"
 }
 
 CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
 
 If no login form found, return:
-{"action": "", "method": "", "username_field": "", "password_field": ""}
+{"action": "", "method": "", "username_field": "", "password_field": "", "csrf_token": "", "csrf_token_field": ""}

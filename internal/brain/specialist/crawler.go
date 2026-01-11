@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var crawlerMessageCounter atomic.Uint64
@@ -98,9 +99,9 @@ func (c *CrawlerSpecialist) executeTask(cmdEvent bus.Event) {
 		return
 	}
 
-	// Start BFS crawling from base URL
-	log.Printf("[%s] Starting BFS crawl from: %s\n", c.id, c.baseURL)
-	c.crawlURL(c.baseURL, 0)
+	// Start parallel crawling from base URL
+	log.Printf("[%s] Starting parallel crawl from: %s\n", c.id, c.baseURL)
+	c.crawlParallel()
 
 	// Force-crawl common upload endpoints that might not be linked
 	c.forceCrawlCommonEndpoints()
@@ -109,7 +110,134 @@ func (c *CrawlerSpecialist) executeTask(cmdEvent bus.Event) {
 	c.reportDiscoveredURLs(cmdEvent.FromAgent)
 }
 
-// crawlURL performs recursive BFS crawling
+// URLTask represents a URL to crawl with its depth
+type URLTask struct {
+	URL   string
+	Depth int
+}
+
+// crawlParallel performs parallel crawling using semaphore worker pattern
+func (c *CrawlerSpecialist) crawlParallel() {
+	// URL queue and concurrency control
+	queue := make(chan URLTask, 200)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10) // Max 10 concurrent workers
+
+	// Add initial URL
+	queue <- URLTask{URL: c.baseURL, Depth: 0}
+	queueSize := 1
+
+	// Worker pool
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+
+			for task := range queue {
+				select {
+				case <-c.ctx.Done():
+					return
+				case sem <- struct{}{}:
+					// Check page limit (atomic)
+					c.mu.Lock()
+					pageCount := len(c.visitedURLs)
+					if pageCount >= c.maxPages {
+						c.mu.Unlock()
+						<-sem
+						continue
+					}
+
+					// Check if already visited
+					if c.visitedURLs[task.URL] {
+						c.mu.Unlock()
+						<-sem
+						continue
+					}
+					c.visitedURLs[task.URL] = true
+					c.mu.Unlock()
+
+					// Process URL
+					newLinks := c.processURL(task)
+					<-sem
+
+					// Add new links to queue
+					for _, link := range newLinks {
+						c.mu.RLock()
+						visited := c.visitedURLs[link]
+						c.mu.RUnlock()
+
+						if !visited && task.Depth+1 <= c.maxDepth {
+							select {
+							case queue <- URLTask{URL: link, Depth: task.Depth + 1}:
+								queueSize++
+							default:
+								// Queue full, skip
+							}
+						}
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Close queue after timeout (all URLs processed)
+	go func() {
+		time.Sleep(10 * time.Second)
+		close(queue)
+	}()
+
+	wg.Wait()
+	log.Printf("[%s] Parallel crawling completed. Pages crawled: %d\n", c.id, len(c.visitedURLs))
+}
+
+// processURL crawls a single URL and returns discovered links
+func (c *CrawlerSpecialist) processURL(task URLTask) []string {
+	// Check depth limit
+	if task.Depth > c.maxDepth {
+		return nil
+	}
+
+	// Filter static resources
+	if c.isStaticResource(task.URL) {
+		return nil
+	}
+
+	// Check if same domain
+	if !c.isSameDomain(task.URL) {
+		return nil
+	}
+
+	log.Printf("[%s] Crawling [depth=%d]: %s\n", c.id, task.Depth, task.URL)
+
+	// Fetch HTTP response
+	httpOutput, err := tools.HTTPGetWithCookie(c.ctx, c.executor, task.URL, c.sessionCookie)
+	if err != nil {
+		log.Printf("[%s] HTTP request failed for %s: %v\n", c.id, task.URL, err)
+		return nil
+	}
+
+	// Check for login form
+	if c.hasLoginForm(httpOutput) {
+		log.Printf("[%s] 🔐 Login form detected at: %s\n", c.id, task.URL)
+		c.reportObservation("Commander-01", fmt.Sprintf("LOGIN_FORM_FOUND: %s", task.URL))
+	}
+
+	// Extract links
+	links := c.extractLinks(httpOutput, task.URL)
+
+	// Add discovered links
+	c.mu.Lock()
+	for _, link := range links {
+		if !c.visitedURLs[link] {
+			c.discoveredURLs = append(c.discoveredURLs, link)
+		}
+	}
+	c.mu.Unlock()
+
+	return links
+}
+
+// crawlURL performs recursive BFS crawling (DEPRECATED - use crawlParallel)
 func (c *CrawlerSpecialist) crawlURL(currentURL string, depth int) {
 	// Check depth limit
 	if depth > c.maxDepth {

