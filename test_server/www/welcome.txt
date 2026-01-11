@@ -1,6 +1,0 @@
-환영합니다!
-
-이 파일은 Directory Traversal 테스트를 위한 샘플 파일입니다.
-
-정상적인 파일 접근: file.php?file=welcome.txt
-취약점 테스트: file.php?file=../../etc/passwd

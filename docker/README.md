@@ -1,62 +1,66 @@
-# Docker Images for cal Hands
+# CAL Project Docker Services
 
-이 디렉토리는 cal의 "Hands" (실행 엔진)가 사용할 보안 도구 Docker 이미지들을 포함합니다.
+이 폴더는 CAL 프로젝트의 Docker 서비스들을 관리합니다.
 
-## 이미지 목록
+## 서비스 목록
 
-### 1. security-tools (올인원)
-모든 기본 보안 도구가 포함된 이미지입니다.
+### 1. cai-qdrant (RAG 벡터 데이터베이스)
+- **위치**: `cal-project/docker/cai-qdrant/`
+- **포트**: 6333 (HTTP), 6334 (gRPC)
+- **용도**: AI 프롬프트 임베딩 저장 (선택적)
+- **시작**: `cd cai-qdrant && docker-compose up -d`
+- **중지**: `cd cai-qdrant && docker-compose down`
 
-**포함된 도구:**
-- nmap
-- curl
-- wget
-- DNS tools (dig, nslookup)
-- Python 3
+### 2. test_server (취약한 웹 서버)
+- **위치**: `cal-project/docker/test_server/`
+- **포트**: 8888
+- **용도**: 보안 테스트 타겟
+- **이미지**: Python Flask 기반 취약한 웹 애플리케이션
+- **빌드**: `cd test_server && docker-compose build`
+- **시작**: `cd test_server && docker-compose up -d`
+- **중지**: `cd test_server && docker-compose down`
 
-**빌드:**
+**포함된 취약점**:
+- SQL Injection (`search.php`)
+- XSS (`comment.php`)
+- Command Injection (`ping.php`)
+- Directory Traversal (`file.php`)
+
+⚠️ **경고**: 이 서버는 의도적으로 취약합니다. 절대 공개 네트워크에 노출하지 마세요.
+
+## 전체 시작/중지
+
+### 모두 시작
 ```bash
-docker build -t cal/security-tools:latest ./security-tools
+cd cal-project/docker
+docker-compose -f cai-qdrant/docker-compose.yml up -d
+docker-compose -f test_server/docker-compose.yml up -d
 ```
 
-**사용 예:**
+### 모두 중지
 ```bash
-docker run --rm cal/security-tools nmap -p 80 example.com
+cd cal-project/docker
+docker-compose -f cai-qdrant/docker-compose.yml down
+docker-compose -f test_server/docker-compose.yml down
 ```
 
-### 2. nmap (경량)
-nmap만 포함된 경량 이미지입니다.
+## 저장소 구조
 
-**빌드:**
-```bash
-docker build -t cal/nmap:latest ./nmap
+```
+cal-project/docker/
+├── cai-qdrant/
+│   ├── docker-compose.yml
+│   └── storage/              # Qdrant 데이터 저장소
+├── test_server/
+│   ├── docker-compose.yml
+│   ├── Dockerfile
+│   ├── app.py                # Flask 애플리케이션
+│   ├── www/                  # 정적 파일 (HTML, PHP)
+│   └── README.md             # 취약점 상세 설명
+└── README.md                 # 이 파일
 ```
 
-**사용 예:**
-```bash
-docker run --rm cal/nmap -p 1-1000 scanme.nmap.org
-```
+## 참고
 
-## 빌드 스크립트
-
-모든 이미지를 한 번에 빌드:
-```bash
-# Windows PowerShell
-docker build -t cal/security-tools:latest .\security-tools
-docker build -t cal/nmap:latest .\nmap
-
-# Linux/Mac
-docker build -t cal/security-tools:latest ./security-tools
-docker build -t cal/nmap:latest ./nmap
-```
-
-## cal 코드 업데이트
-
-`internal/hands/tools/tools.go`에서 이미지 이름을 변경하여 커스텀 이미지 사용:
-
-```go
-func NmapScan(ctx context.Context, executor ToolExecutor, target string, ports string) (string, error) {
-    cmd := []string{"-p", ports, target}
-    return executor.RunTool(ctx, "cal/nmap:latest", cmd)  // 변경됨
-}
-```
+- TRT (Toncal) Docker 서비스는 `E:\business\Cai\TRT\toncal\` 폴더에서 별도 관리됩니다.
+- Qdrant 데이터는 `cai-qdrant/storage/`에 영구 저장됩니다.
