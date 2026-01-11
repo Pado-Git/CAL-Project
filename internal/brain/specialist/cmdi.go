@@ -674,9 +674,19 @@ func (c *CommandInjectionSpecialist) reportCompromised(targetURL string, agent t
 	// Find source NetworkNode using the original agent's IP addresses
 	// ============================================================================
 	if c.trtClient != nil {
-		// Use agent's Host IP for NetworkNode
-		ipAddress := agent.Host
-		hostname := fmt.Sprintf("Compromised-%s", agent.Paw)
+		// Use agent's IP from HostIPAddrs (not Host which is container hostname)
+		// Parse host_ip_addrs to get actual IP address
+		agentIPs := c.parseHostIPAddrs(agent.HostIPAddrs)
+		var ipAddress string
+		if len(agentIPs) > 0 {
+			ipAddress = agentIPs[0] // Use first IP
+		} else {
+			ipAddress = agent.Host // Fallback to Host if no IPs available
+		}
+		hostname := agent.Host // Use actual hostname (e.g., container name)
+		if hostname == "" || hostname == ipAddress {
+			hostname = fmt.Sprintf("Compromised-%s", agent.Paw)
+		}
 		role := "COMPROMISED"
 
 		// Find source NetworkNode from the original agent's IP addresses
