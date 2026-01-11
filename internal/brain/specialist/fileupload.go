@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -126,6 +128,12 @@ func (f *FileUploadSpecialist) replaceLocalhostForDocker(targetURL string) strin
 }
 
 func (f *FileUploadSpecialist) analyzeForFileUpload(httpResponse string) string {
+	// OPTIMIZATION: Pattern matching first (skip LLM if clear file upload patterns found)
+	if patternResult := f.patternMatchFileUpload(httpResponse); patternResult != "" {
+		log.Printf("[%s] Pattern match found File Upload indicators, skipping LLM\n", f.id)
+		return patternResult
+	}
+
 	// Limit response size for LLM
 	responseToAnalyze := httpResponse
 	if len(httpResponse) > 4000 {
@@ -141,6 +149,60 @@ func (f *FileUploadSpecialist) analyzeForFileUpload(httpResponse string) string 
 	}
 
 	return analysis
+}
+
+// patternMatchFileUpload performs fast pattern matching for File Upload indicators
+func (f *FileUploadSpecialist) patternMatchFileUpload(httpResponse string) string {
+	// File input patterns
+	fileInputPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`<input[^>]*type=["']?file["']?[^>]*>`),
+		regexp.MustCompile(`<input[^>]*type=["']?file["']?[^>]*name=["']?([^"'\s>]+)["']?`),
+	}
+
+	// Form patterns with enctype for file upload
+	formPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`<form[^>]*enctype=["']?multipart/form-data["']?[^>]*>`),
+		regexp.MustCompile(`<form[^>]*action=["']?([^"'\s>]+)["']?[^>]*enctype=["']?multipart/form-data["']?`),
+	}
+
+	// Check for file input
+	var inputName string
+	for _, pattern := range fileInputPatterns {
+		if match := pattern.FindStringSubmatch(httpResponse); len(match) > 0 {
+			if len(match) > 1 {
+				inputName = match[1]
+			} else {
+				inputName = "file" // default
+			}
+			break
+		}
+	}
+
+	// Check for multipart form
+	var formAction string
+	for _, pattern := range formPatterns {
+		if match := pattern.FindStringSubmatch(httpResponse); len(match) > 0 {
+			if len(match) > 1 {
+				formAction = match[1]
+			}
+			break
+		}
+	}
+
+	// If file input found, generate result
+	if inputName != "" {
+		result := "VULNERABILITY CANDIDATE FOUND: Yes\n"
+		result += fmt.Sprintf("- LOCATION: %s\n", f.target)
+		result += fmt.Sprintf("- FILE INPUT NAME: %s\n", inputName)
+		result += "- CONFIDENCE: Medium (Pattern-based detection)\n"
+		result += "- REASONING: File upload form detected\n"
+		if formAction != "" {
+			result += fmt.Sprintf("- UPLOAD ENDPOINT: %s\n", formAction)
+		}
+		return result
+	}
+
+	return "" // Fallback to LLM
 }
 
 // reportCandidateIfFound parses LLM analysis and reports vulnerability candidate to Reporter
@@ -225,7 +287,15 @@ func (f *FileUploadSpecialist) reportCandidateIfFound(analysis string) {
 	f.bus.Publish("Reporter-01", event)
 }
 
-// exploitFileUpload attempts to exploit File Upload vulnerability
+// FileUploadResult holds the result of a single upload test
+type FileUploadResult struct {
+	Filename  string
+	Extension string
+	Success   bool
+	Evidence  string
+}
+
+// exploitFileUpload attempts to exploit File Upload vulnerability (PARALLEL)
 func (f *FileUploadSpecialist) exploitFileUpload(targetURL, parameter string) (bool, string) {
 	// Test files to upload (from innocent to malicious)
 	type uploadTest struct {
@@ -268,66 +338,100 @@ func (f *FileUploadSpecialist) exploitFileUpload(targetURL, parameter string) (b
 
 	dockerURL := f.replaceLocalhostForDocker(targetURL)
 
+	// Parallel testing
+	results := make(chan FileUploadResult, len(tests))
+	var wg sync.WaitGroup
+
 	for _, test := range tests {
-		log.Printf("[%s] Testing upload: %s\n", f.id, test.filename)
-
-		// Create multipart upload using curl
-		curlCmd := fmt.Sprintf(
-			`curl -s -X POST -F "%s=@/dev/stdin;filename=%s;type=%s" "%s"`,
-			parameter,
-			test.filename,
-			test.contentType,
-			dockerURL,
-		)
-
-		// Execute curl with file content piped to stdin
-		uploadCmd := fmt.Sprintf(`echo '%s' | %s`, test.content, curlCmd)
-
-		// Run the upload attempt using RunTool with curl Docker image
-		response, err := f.executor.RunTool(f.ctx, "curlimages/curl:latest", []string{"/bin/sh", "-c", uploadCmd})
-		if err != nil {
-			log.Printf("[%s] Upload attempt failed: %v\n", f.id, err)
-			continue
-		}
-
-		// Check response for success indicators
-		successIndicators := []string{
-			"upload",
-			"success",
-			"file saved",
-			"uploaded successfully",
-			test.filename,
-			"CAI_",
-		}
-
-		responseL := strings.ToLower(response)
-		for _, indicator := range successIndicators {
-			if strings.Contains(responseL, strings.ToLower(indicator)) {
-				// Truncate response to 200 chars if needed
-				responsePreview := response
-				if len(response) > 200 {
-					responsePreview = response[:200]
-				}
-
-				evidence := fmt.Sprintf(
-					"File upload successful. Uploaded file: %s (%s). Server response indicates success: %s",
-					test.filename,
-					test.extension,
-					responsePreview,
-				)
-				log.Printf("[%s] ✅ FILE UPLOAD VERIFIED: %s\n", f.id, evidence)
-
-				// Try to verify by accessing the uploaded file
-				if f.verifyUploadedFile(dockerURL, test.filename, test.content) {
-					evidence += " | File access confirmed - uploaded file is accessible."
-				}
-
-				return true, evidence
+		wg.Add(1)
+		go func(t uploadTest) {
+			defer wg.Done()
+			success, evidence := f.testSingleUpload(dockerURL, parameter, t.filename, t.content, t.contentType, t.extension)
+			results <- FileUploadResult{
+				Filename:  t.filename,
+				Extension: t.extension,
+				Success:   success,
+				Evidence:  evidence,
 			}
+		}(test)
+	}
+
+	// Close results channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Check results - return on first success
+	for result := range results {
+		if result.Success {
+			log.Printf("[%s] ✅ FILE UPLOAD VERIFIED: %s\n", f.id, result.Evidence)
+			return true, result.Evidence
 		}
 	}
 
 	log.Printf("[%s] ❌ File Upload exploitation failed: No successful uploads detected\n", f.id)
+	return false, ""
+}
+
+// testSingleUpload tests a single file upload
+func (f *FileUploadSpecialist) testSingleUpload(dockerURL, parameter, filename, content, contentType, extension string) (bool, string) {
+	log.Printf("[%s] Testing upload: %s\n", f.id, filename)
+
+	// Create multipart upload using curl
+	curlCmd := fmt.Sprintf(
+		`curl -s -X POST -F "%s=@/dev/stdin;filename=%s;type=%s" "%s"`,
+		parameter,
+		filename,
+		contentType,
+		dockerURL,
+	)
+
+	// Execute curl with file content piped to stdin
+	uploadCmd := fmt.Sprintf(`echo '%s' | %s`, content, curlCmd)
+
+	// Run the upload attempt using RunTool with curl Docker image
+	response, err := f.executor.RunTool(f.ctx, "curlimages/curl:latest", []string{"/bin/sh", "-c", uploadCmd})
+	if err != nil {
+		log.Printf("[%s] Upload attempt failed: %v\n", f.id, err)
+		return false, ""
+	}
+
+	// Check response for success indicators
+	successIndicators := []string{
+		"upload",
+		"success",
+		"file saved",
+		"uploaded successfully",
+		filename,
+		"CAI_",
+	}
+
+	responseL := strings.ToLower(response)
+	for _, indicator := range successIndicators {
+		if strings.Contains(responseL, strings.ToLower(indicator)) {
+			// Truncate response to 200 chars if needed
+			responsePreview := response
+			if len(response) > 200 {
+				responsePreview = response[:200]
+			}
+
+			evidence := fmt.Sprintf(
+				"File upload successful. Uploaded file: %s (%s). Server response indicates success: %s",
+				filename,
+				extension,
+				responsePreview,
+			)
+
+			// Try to verify by accessing the uploaded file
+			if f.verifyUploadedFile(dockerURL, filename, content) {
+				evidence += " | File access confirmed - uploaded file is accessible."
+			}
+
+			return true, evidence
+		}
+	}
+
 	return false, ""
 }
 

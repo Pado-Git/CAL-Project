@@ -20,6 +20,7 @@ const (
 	Error       EventType = "ERROR"
 	Command     EventType = "COMMAND"
 	Engagement  EventType = "ENGAGEMENT"
+	Compromised EventType = "COMPROMISED" // Target shell obtained, agent deployed
 )
 
 // Event (AgentMessage) represents the standardized message exchanged between agents

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -601,6 +602,12 @@ func (c *Commander) spawnWebSpecialistDirect(targetURL string) {
 }
 
 func (c *Commander) spawnWebSpecialist(targetURL string) {
+	// Pre-check: Verify target is reachable before spawning
+	if !c.isTargetReachable(targetURL) {
+		log.Printf("[%s] ⏭️ Skipping unreachable target: %s\n", c.id, targetURL)
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -1232,4 +1239,37 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// isTargetReachable performs a quick HTTP HEAD request to verify target is reachable
+// This prevents adding non-existent hosts to the engagement list
+func (c *Commander) isTargetReachable(targetURL string) bool {
+	// Quick timeout for reachability check
+	ctx, cancel := context.WithTimeout(c.ctx, 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "HEAD", targetURL, nil)
+	if err != nil {
+		return false
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible)")
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Allow redirects, just checking if host responds
+			return nil
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// Connection refused, timeout, etc.
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Any response (even 4xx/5xx) means the host is reachable
+	return true
 }

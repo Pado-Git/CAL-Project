@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -17,17 +18,31 @@ type Client struct {
 	Token      string
 }
 
-// NewClient creates a new TRT API client
+// NewClient creates a new TRT API client with connection pooling
 func NewClient() *Client {
 	baseURL := os.Getenv("TRT_API_URL")
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"
 	}
 
+	// HTTP Transport with connection pooling for Keep-Alive
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		MaxConnsPerHost:     50,
+		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   false,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+
 	return &Client{
 		BaseURL: baseURL,
 		HTTPClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: transport,
 		},
 	}
 }
@@ -64,12 +79,15 @@ func (c *Client) Authenticate() error {
 
 // Agent represents a connected Callisto agent
 type Agent struct {
-	Paw      string `json:"paw"`
-	Host     string `json:"host"`
-	Platform string `json:"platform"` // windows, linux
-	Server   string `json:"server"`
-	Depth    int    `json:"depth"`
-	Contact  string `json:"contact"`
+	Paw         string `json:"paw"`
+	Host        string `json:"host"`
+	Platform    string `json:"platform"` // windows, linux
+	Server      string `json:"server"`
+	Depth       int    `json:"depth"`
+	Contact     string `json:"contact"`
+	Username    string `json:"username"`  // User context (e.g., root, SYSTEM)
+	Privilege   string `json:"privilege"` // Elevated, User
+	HostIPAddrs string `json:"host_ip_addrs"` // JSON array string: "[\"192.168.1.1\", \"10.0.0.1\"]"
 }
 
 // GetAliveAgents returns a list of active agents
@@ -322,6 +340,23 @@ func (c *Client) GetNetworkNodes() ([]NetworkNode, error) {
 	return nodes, nil
 }
 
+// GetNetworkNodeByIP finds a network node by IP address
+// Returns nil if no matching node is found
+func (c *Client) GetNetworkNodeByIP(ipAddress string) (*NetworkNode, error) {
+	nodes, err := c.GetNetworkNodes()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, node := range nodes {
+		if node.IPAddress == ipAddress {
+			return &node, nil
+		}
+	}
+
+	return nil, nil // Not found, but not an error
+}
+
 // ScanResultPort represents a discovered port
 type ScanResultPort struct {
 	Port     int    `json:"port"`
@@ -374,6 +409,63 @@ func (c *Client) SaveScanResult(sourcePAW string, hosts []ScanResultHost) error 
 	}
 
 	return nil
+}
+
+// CreateNetworkNodeRequest represents the payload for creating a network node
+type CreateNetworkNodeRequest struct {
+	IPAddress    string `json:"ipAddress"`
+	Hostname     string `json:"hostname"`
+	Role         string `json:"role"`
+	OS           string `json:"os,omitempty"`
+	Platform     string `json:"platform,omitempty"`
+	Compromised  bool   `json:"compromised,omitempty"`
+	SourceNodeID *int   `json:"sourceNodeId,omitempty"` // Optional: creates edge from source -> new node
+}
+
+// CreateNetworkNode creates a new network node in TRT for a compromised target
+// If sourceNodeID is provided, an edge will be created from source node to the new node
+func (c *Client) CreateNetworkNode(ipAddress string, hostname string, role string, platform string, compromised bool, sourceNodeID ...int) (*NetworkNode, error) {
+	reqBody := CreateNetworkNodeRequest{
+		IPAddress:   ipAddress,
+		Hostname:    hostname,
+		Role:        role,
+		Platform:    platform,
+		Compromised: compromised,
+	}
+	// Set sourceNodeID if provided
+	if len(sourceNodeID) > 0 && sourceNodeID[0] > 0 {
+		reqBody.SourceNodeID = &sourceNodeID[0]
+	}
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal network node request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", c.BaseURL+"/networknodes", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	c.addAuthHeader(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create network node: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Accept both 200 and 201 as success
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("create network node failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var node NetworkNode
+	if err := json.NewDecoder(resp.Body).Decode(&node); err != nil {
+		return nil, fmt.Errorf("failed to decode network node response: %w", err)
+	}
+
+	return &node, nil
 }
 
 func (c *Client) addAuthHeader(req *http.Request) {

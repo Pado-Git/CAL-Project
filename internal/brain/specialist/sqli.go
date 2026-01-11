@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -168,6 +170,12 @@ func (s *SQLInjectionSpecialist) replaceLocalhostForDocker(targetURL string) str
 }
 
 func (s *SQLInjectionSpecialist) analyzeForSQLi(httpResponse string) string {
+	// OPTIMIZATION: Pattern matching first (skip LLM if clear SQL patterns found)
+	if patternResult := s.patternMatchSQLi(httpResponse); patternResult != "" {
+		log.Printf("[%s] Pattern match found SQLi indicators, skipping LLM\n", s.id)
+		return patternResult
+	}
+
 	// Limit response size for LLM
 	responseToAnalyze := httpResponse
 	if len(httpResponse) > 4000 {
@@ -183,6 +191,75 @@ func (s *SQLInjectionSpecialist) analyzeForSQLi(httpResponse string) string {
 	}
 
 	return analysis
+}
+
+// patternMatchSQLi performs fast pattern matching for SQLi indicators
+func (s *SQLInjectionSpecialist) patternMatchSQLi(httpResponse string) string {
+	// SQL error patterns indicating vulnerability
+	sqlErrorPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)mysql.*error`),
+		regexp.MustCompile(`(?i)sql\s*syntax.*error`),
+		regexp.MustCompile(`(?i)warning.*mysql`),
+		regexp.MustCompile(`(?i)unclosed quotation mark`),
+		regexp.MustCompile(`(?i)quoted string not properly terminated`),
+		regexp.MustCompile(`(?i)ORA-\d{5}`), // Oracle errors
+		regexp.MustCompile(`(?i)Microsoft.*ODBC.*SQL Server`),
+		regexp.MustCompile(`(?i)PostgreSQL.*ERROR`),
+		regexp.MustCompile(`(?i)SQLite.*error`),
+	}
+
+	// Check for SQL errors in response
+	for _, pattern := range sqlErrorPatterns {
+		if match := pattern.FindString(httpResponse); match != "" {
+			log.Printf("[%s] SQL error detected: %s\n", s.id, match)
+			return s.buildSQLiPatternResult(match)
+		}
+	}
+
+	// Check for input forms that might be vulnerable
+	formPattern := regexp.MustCompile(`<form[^>]*>`)
+	inputPattern := regexp.MustCompile(`<input[^>]*name=["']([^"']+)["'][^>]*>`)
+
+	if formPattern.MatchString(httpResponse) {
+		inputs := inputPattern.FindAllStringSubmatch(httpResponse, -1)
+		if len(inputs) > 0 {
+			// Look for login/search forms
+			for _, input := range inputs {
+				if len(input) > 1 {
+					paramName := strings.ToLower(input[1])
+					if paramName == "id" || paramName == "user" || paramName == "username" ||
+						paramName == "login" || paramName == "search" || paramName == "query" ||
+						paramName == "password" || paramName == "email" {
+						return s.buildSQLiFormResult(input[1])
+					}
+				}
+			}
+		}
+	}
+
+	return "" // Fallback to LLM
+}
+
+// buildSQLiPatternResult creates result from error pattern match
+func (s *SQLInjectionSpecialist) buildSQLiPatternResult(errorMatch string) string {
+	result := "VULNERABILITY CANDIDATE FOUND: Yes\n"
+	result += fmt.Sprintf("- LOCATION: %s\n", s.target)
+	result += "- VULNERABLE PARAMETER: TBD (SQL error detected in response)\n"
+	result += "- CONFIDENCE: High (Error-based detection)\n"
+	result += fmt.Sprintf("- REASONING: SQL error message found: %s\n", errorMatch)
+	result += "- SUGGESTED PAYLOAD: ' OR '1'='1\n"
+	return result
+}
+
+// buildSQLiFormResult creates result from form parameter match
+func (s *SQLInjectionSpecialist) buildSQLiFormResult(paramName string) string {
+	result := "VULNERABILITY CANDIDATE FOUND: Yes\n"
+	result += fmt.Sprintf("- LOCATION: %s\n", s.target)
+	result += fmt.Sprintf("- VULNERABLE PARAMETER: %s\n", paramName)
+	result += "- CONFIDENCE: Medium (Pattern-based detection)\n"
+	result += "- REASONING: Input form with potential SQL-injectable parameter detected\n"
+	result += "- SUGGESTED PAYLOAD: ' OR '1'='1\n"
+	return result
 }
 
 func (s *SQLInjectionSpecialist) generateReport(httpResponse string, analysis string) string {
@@ -506,31 +583,59 @@ func (s *SQLInjectionSpecialist) reportVerifiedSQLi(vulnType string, targetURL s
 	log.Printf("[%s] ✅ Verified SQLi: %s at %s\n", s.id, vulnType, targetURL)
 }
 
-// exploitSQLi attempts to exploit SQLi vulnerability using multiple techniques
+// SQLiResult holds the result of an SQLi technique test
+type SQLiResult struct {
+	Technique string
+	Success   bool
+	Payload   string
+}
+
+// exploitSQLi attempts to exploit SQLi vulnerability using multiple techniques (PARALLEL)
 // Returns true if any technique succeeds
 func (s *SQLInjectionSpecialist) exploitSQLi(targetURL string, parameter string) bool {
-	// Try Boolean-based first (fastest)
-	success, payload := s.verifyBooleanBased(targetURL, parameter)
-	if success {
-		evidence := fmt.Sprintf("Boolean-based Blind SQLi confirmed with payload: %s", payload)
-		s.reportVerifiedSQLi("SQLi-BooleanBased", targetURL, payload, evidence)
-		return true
-	}
+	results := make(chan SQLiResult, 3)
+	var wg sync.WaitGroup
 
-	// Try UNION-based (data extraction)
-	success, payload = s.verifyUnionBased(targetURL, parameter)
-	if success {
-		evidence := fmt.Sprintf("UNION-based SQLi confirmed with payload: %s", payload)
-		s.reportVerifiedSQLi("SQLi-UnionBased", targetURL, payload, evidence)
-		return true
-	}
+	// Run all three techniques in parallel
+	wg.Add(3)
 
-	// Try Time-based (slowest but most reliable)
-	success, payload = s.verifyTimeBased(targetURL, parameter)
-	if success {
-		evidence := fmt.Sprintf("Time-based Blind SQLi confirmed with payload: %s", payload)
-		s.reportVerifiedSQLi("SQLi-TimeBased", targetURL, payload, evidence)
-		return true
+	// Boolean-based (fastest)
+	go func() {
+		defer wg.Done()
+		success, payload := s.verifyBooleanBased(targetURL, parameter)
+		results <- SQLiResult{Technique: "BooleanBased", Success: success, Payload: payload}
+	}()
+
+	// UNION-based
+	go func() {
+		defer wg.Done()
+		success, payload := s.verifyUnionBased(targetURL, parameter)
+		results <- SQLiResult{Technique: "UnionBased", Success: success, Payload: payload}
+	}()
+
+	// Time-based (slowest but most reliable) - skip for speed optimization
+	go func() {
+		defer wg.Done()
+		// Skip time-based by default for speed (5+ seconds per test)
+		// Uncomment below to enable
+		// success, payload := s.verifyTimeBased(targetURL, parameter)
+		// results <- SQLiResult{Technique: "TimeBased", Success: success, Payload: payload}
+		results <- SQLiResult{Technique: "TimeBased", Success: false, Payload: ""}
+	}()
+
+	// Close results channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Check results - report first success
+	for result := range results {
+		if result.Success {
+			evidence := fmt.Sprintf("%s SQLi confirmed with payload: %s", result.Technique, result.Payload)
+			s.reportVerifiedSQLi("SQLi-"+result.Technique, targetURL, result.Payload, evidence)
+			return true
+		}
 	}
 
 	return false

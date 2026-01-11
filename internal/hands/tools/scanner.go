@@ -12,9 +12,11 @@ import (
 
 // 스캔 설정 상수
 const (
-	PortTimeout         = 500 * time.Millisecond
-	MaxConcurrentHosts  = 50
-	MaxConcurrentPorts  = 100
+	PortTimeout           = 500 * time.Millisecond
+	MaxConcurrentHosts    = 50
+	MaxConcurrentPorts    = 100
+	MaxConcurrentSubnets  = 10  // 병렬 서브넷 스캔 수
+	SubnetScanTimeout     = 60 * time.Second
 )
 
 // DefaultPorts 스캔할 기본 포트 목록
@@ -327,4 +329,121 @@ func ScanResultsToMap(results []ScanResult) []map[string]interface{} {
 	}
 
 	return hosts
+}
+
+// ScanNetworkParallel scans large networks by splitting into subnets
+// For CIDR ranges larger than /24, it splits into /24 subnets and scans in parallel
+func ScanNetworkParallel(ctx context.Context, target string, ports []int, timeout time.Duration) ([]ScanResult, error) {
+	// Check if it's a CIDR range
+	if !strings.Contains(target, "/") {
+		// Single host, use regular ScanNetwork
+		return ScanNetwork(ctx, target, ports, timeout)
+	}
+
+	// Parse CIDR to check prefix length
+	_, ipnet, err := net.ParseCIDR(target)
+	if err != nil {
+		return ScanNetwork(ctx, target, ports, timeout)
+	}
+
+	prefixLen, _ := ipnet.Mask.Size()
+
+	// For /24 or smaller ranges, use regular ScanNetwork
+	if prefixLen >= 24 {
+		return ScanNetwork(ctx, target, ports, timeout)
+	}
+
+	// Split into /24 subnets for larger ranges
+	subnets := splitIntoSubnets(target, 24)
+	if len(subnets) == 0 {
+		return ScanNetwork(ctx, target, ports, timeout)
+	}
+
+	// Parallel subnet scanning
+	var allResults []ScanResult
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, MaxConcurrentSubnets)
+
+	for _, subnet := range subnets {
+		wg.Add(1)
+		go func(s string) {
+			defer wg.Done()
+
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			}
+
+			// Apply per-subnet timeout
+			subnetCtx, cancel := context.WithTimeout(ctx, SubnetScanTimeout)
+			defer cancel()
+
+			results, err := ScanNetwork(subnetCtx, s, ports, timeout)
+			if err != nil {
+				return
+			}
+
+			if len(results) > 0 {
+				mu.Lock()
+				allResults = append(allResults, results...)
+				mu.Unlock()
+			}
+		}(subnet)
+	}
+
+	wg.Wait()
+
+	// Sort by IP
+	sort.Slice(allResults, func(i, j int) bool {
+		return allResults[i].Host < allResults[j].Host
+	})
+
+	return allResults, nil
+}
+
+// splitIntoSubnets splits a CIDR range into smaller subnets
+// targetPrefix specifies the desired subnet prefix length (e.g., 24 for /24)
+func splitIntoSubnets(cidr string, targetPrefix int) []string {
+	ip, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil
+	}
+
+	currentPrefix, bits := ipnet.Mask.Size()
+	if currentPrefix >= targetPrefix {
+		return []string{cidr}
+	}
+
+	// Calculate number of subnets
+	numSubnets := 1 << (targetPrefix - currentPrefix)
+	subnets := make([]string, 0, numSubnets)
+
+	// Get base IP
+	baseIP := ip.Mask(ipnet.Mask).To4()
+	if baseIP == nil {
+		return nil
+	}
+
+	// Calculate subnet size
+	subnetSize := 1 << (bits - targetPrefix)
+
+	for i := 0; i < numSubnets; i++ {
+		// Calculate subnet IP
+		offset := i * subnetSize
+		subnetIP := make(net.IP, 4)
+		copy(subnetIP, baseIP)
+
+		// Add offset to IP
+		for j := 3; j >= 0; j-- {
+			subnetIP[j] += byte(offset & 0xFF)
+			offset >>= 8
+		}
+
+		subnets = append(subnets, fmt.Sprintf("%s/%d", subnetIP.String(), targetPrefix))
+	}
+
+	return subnets
 }

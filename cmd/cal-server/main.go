@@ -55,7 +55,9 @@ func main() {
 	fmt.Println("CAL-like Autonomous Security Platform Starting...")
 	fmt.Println("mode: Distributed Multi-Agent System (Go)")
 
-	ctx := context.Background()
+	// Global context with timeout (5 minutes)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
 	// Determine RAG mode (CLI > ENV > config.yaml)
 	ragEnabled := *enableRAG || *ragShort

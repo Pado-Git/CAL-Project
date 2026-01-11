@@ -36,26 +36,39 @@ type VulnerabilityCandidate struct {
 	Status      string `json:"status"` // "pending", "verifying", "verified", "false_positive"
 }
 
+// CompromisedTarget represents a target where shell access was obtained and agent deployed
+type CompromisedTarget struct {
+	URL       string `json:"url"`       // Target URL where RCE was exploited
+	AgentPAW  string `json:"agent_paw"` // Deployed agent's PAW identifier
+	Platform  string `json:"platform"`  // linux, windows
+	Host      string `json:"host"`      // Hostname of compromised system
+	Username  string `json:"username"`  // User context (e.g., root, SYSTEM)
+	Privilege string `json:"privilege"` // Elevated, User
+	Timestamp string `json:"timestamp"`
+}
+
 // Reporter collects findings and generates reports
 type Reporter struct {
-	id             string
-	bus            bus.Bus
-	target         string
-	engagedTargets []string
-	findings       []VulnerabilityFinding
-	candidates     []VulnerabilityCandidate
-	mu             sync.RWMutex
+	id                 string
+	bus                bus.Bus
+	target             string
+	engagedTargets     []string
+	compromisedTargets []CompromisedTarget
+	findings           []VulnerabilityFinding
+	candidates         []VulnerabilityCandidate
+	mu                 sync.RWMutex
 }
 
 // NewReporter creates a new Reporter agent
 func NewReporter(eventBus bus.Bus, target string) *Reporter {
 	return &Reporter{
-		id:             "Reporter-01",
-		bus:            eventBus,
-		target:         target,
-		engagedTargets: make([]string, 0),
-		findings:       make([]VulnerabilityFinding, 0),
-		candidates:     make([]VulnerabilityCandidate, 0),
+		id:                 "Reporter-01",
+		bus:                eventBus,
+		target:             target,
+		engagedTargets:     make([]string, 0),
+		compromisedTargets: make([]CompromisedTarget, 0),
+		findings:           make([]VulnerabilityFinding, 0),
+		candidates:         make([]VulnerabilityCandidate, 0),
 	}
 }
 
@@ -84,6 +97,9 @@ func (r *Reporter) OnEvent(event bus.Event) {
 	if event.Type == bus.Engagement {
 		r.processEngagement(event)
 	}
+	if event.Type == bus.Compromised {
+		r.processCompromised(event)
+	}
 }
 
 func (r *Reporter) processEngagement(event bus.Event) {
@@ -104,6 +120,44 @@ func (r *Reporter) processEngagement(event bus.Event) {
 
 	r.engagedTargets = append(r.engagedTargets, target)
 	log.Printf("[%s] 🎯 Engagement Recorded: %s\n", r.id, target)
+	r.generateMarkdownReport()
+}
+
+func (r *Reporter) processCompromised(event bus.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var compromised CompromisedTarget
+
+	switch payload := event.Payload.(type) {
+	case string:
+		if err := json.Unmarshal([]byte(payload), &compromised); err != nil {
+			log.Printf("[%s] Error parsing compromised JSON: %v. Raw: %s\n", r.id, err, payload)
+			return
+		}
+	case CompromisedTarget:
+		compromised = payload
+	default:
+		// Attempt manual mapping if it's a generic map
+		if payloadMap, ok := event.Payload.(map[string]interface{}); ok {
+			jsonBytes, _ := json.Marshal(payloadMap)
+			json.Unmarshal(jsonBytes, &compromised)
+		} else {
+			log.Printf("[%s] Unknown payload type for compromised: %T\n", r.id, event.Payload)
+			return
+		}
+	}
+
+	// De-duplicate by AgentPAW
+	for _, c := range r.compromisedTargets {
+		if c.AgentPAW == compromised.AgentPAW {
+			return // Already recorded
+		}
+	}
+
+	r.compromisedTargets = append(r.compromisedTargets, compromised)
+	log.Printf("[%s] 💀 COMPROMISED TARGET: %s (Agent: %s, Platform: %s, User: %s)\n",
+		r.id, compromised.URL, compromised.AgentPAW, compromised.Platform, compromised.Username)
 	r.generateMarkdownReport()
 }
 
@@ -204,6 +258,7 @@ func (r *Reporter) generateMarkdownReport() {
 	content += fmt.Sprintf("**Target:** %s\n", r.target)
 	content += fmt.Sprintf("**Generated:** %s\n", time.Now().Format(time.RFC1123))
 	content += fmt.Sprintf("**Engaged Targets:** %d\n", len(r.engagedTargets))
+	content += fmt.Sprintf("**Compromised Targets:** %d\n", len(r.compromisedTargets))
 	content += fmt.Sprintf("**Vulnerability Candidates:** %d\n", len(r.candidates))
 	content += fmt.Sprintf("**Verified Vulnerabilities:** %d\n\n", len(r.findings))
 
@@ -214,6 +269,21 @@ func (r *Reporter) generateMarkdownReport() {
 		content += "The following targets were identified and subjected to active security testing:\n"
 		for _, t := range r.engagedTargets {
 			content += fmt.Sprintf("- `%s`\n", t)
+		}
+		content += "\n"
+	}
+
+	// Compromised Targets - Systems where shell access was obtained
+	content += "## 💀 Compromised Targets (Shell Obtained)\n"
+	if len(r.compromisedTargets) == 0 {
+		content += "No targets have been fully compromised yet.\n\n"
+	} else {
+		content += "The following targets have been fully compromised with agent deployment:\n\n"
+		content += "| Target URL | Agent PAW | Platform | Host | User | Privilege |\n"
+		content += "|---|---|---|---|---|---|\n"
+		for _, c := range r.compromisedTargets {
+			content += fmt.Sprintf("| `%s` | `%s` | %s | %s | %s | **%s** |\n",
+				c.URL, c.AgentPAW, c.Platform, c.Host, c.Username, c.Privilege)
 		}
 		content += "\n"
 	}

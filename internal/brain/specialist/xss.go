@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -128,13 +130,19 @@ func (x *XSSSpecialist) replaceLocalhostForDocker(targetURL string) string {
 }
 
 func (x *XSSSpecialist) analyzeForXSS(httpResponse string) string {
+	// OPTIMIZATION: Pattern matching first (skip LLM if clear patterns found)
+	if patternResult := x.patternMatchXSS(httpResponse); patternResult != "" {
+		log.Printf("[%s] Pattern match found XSS indicators, skipping LLM\n", x.id)
+		return patternResult
+	}
+
 	// Limit response size for LLM
 	responseToAnalyze := httpResponse
 	if len(httpResponse) > 4000 {
 		responseToAnalyze = httpResponse[:4000]
 	}
 
-	// ENHANCED PROMPT for finding specific locations
+	// ENHANCED PROMPT for finding specific locations (only when pattern matching fails)
 	prompt := prompts.GetXSSAnalysis(responseToAnalyze)
 
 	analysis, err := x.brain.Generate(x.ctx, prompt)
@@ -144,6 +152,73 @@ func (x *XSSSpecialist) analyzeForXSS(httpResponse string) string {
 	}
 
 	return analysis
+}
+
+// patternMatchXSS performs fast pattern matching for XSS indicators
+func (x *XSSSpecialist) patternMatchXSS(httpResponse string) string {
+	// Common patterns indicating XSS vulnerability
+	formPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`<form[^>]*>`),
+		regexp.MustCompile(`<input[^>]*type=["']?(text|search|hidden)["']?[^>]*>`),
+		regexp.MustCompile(`<textarea[^>]*>`),
+	}
+
+	// Script/event handler patterns that might indicate reflection
+	reflectionPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`value=["'][^"']*<[^"']*["']`), // Value containing HTML
+		regexp.MustCompile(`<script[^>]*>[^<]*</script>`), // Inline scripts
+	}
+
+	// Extract parameters from forms
+	paramPattern := regexp.MustCompile(`name=["']([^"']+)["']`)
+	params := paramPattern.FindAllStringSubmatch(httpResponse, -1)
+
+	foundForms := false
+	for _, p := range formPatterns {
+		if p.MatchString(httpResponse) {
+			foundForms = true
+			break
+		}
+	}
+
+	// If no forms found, no XSS vulnerability likely
+	if !foundForms || len(params) == 0 {
+		return "" // Return empty to trigger LLM analysis
+	}
+
+	// Check for obvious reflection indicators
+	hasReflection := false
+	for _, p := range reflectionPatterns {
+		if p.MatchString(httpResponse) {
+			hasReflection = true
+			break
+		}
+	}
+
+	// Build parameter list
+	var paramList []string
+	for _, p := range params {
+		if len(p) > 1 {
+			paramList = append(paramList, p[1])
+		}
+	}
+
+	// If clear XSS indicators found, return pattern-based analysis
+	if foundForms && len(paramList) > 0 {
+		result := "VULNERABILITY FOUND: Yes\n"
+		result += fmt.Sprintf("- LOCATION: %s\n", x.target)
+		result += fmt.Sprintf("- VULNERABLE PARAMETER: %s\n", paramList[0])
+		result += "- CONFIDENCE: Medium (Pattern-based detection)\n"
+		if hasReflection {
+			result += "- EVIDENCE: Input form found with potential reflection\n"
+		} else {
+			result += "- EVIDENCE: Input form detected, requires payload testing\n"
+		}
+		result += fmt.Sprintf("- SUGGESTED PAYLOAD: <script>alert('XSS')</script>\n")
+		return result
+	}
+
+	return "" // Fallback to LLM
 }
 
 func (x *XSSSpecialist) generateReport(httpResponse string, analysis string) string {
@@ -225,7 +300,13 @@ func (x *XSSSpecialist) reportCandidateIfFound(analysis string) {
 	x.bus.Publish("Reporter-01", event)
 }
 
-// exploitXSS attempts to exploit an XSS vulnerability by injecting payloads
+// XSSResult holds the result of a single payload test
+type XSSResult struct {
+	Payload  string
+	Verified bool
+}
+
+// exploitXSS attempts to exploit an XSS vulnerability by injecting payloads (PARALLEL)
 func (x *XSSSpecialist) exploitXSS(targetURL, parameter string) bool {
 	// Common XSS payloads for reflection testing
 	payloads := []string{
@@ -236,33 +317,58 @@ func (x *XSSSpecialist) exploitXSS(targetURL, parameter string) bool {
 		"javascript:alert('XSS')",
 	}
 
+	// Parallel testing with early termination
+	results := make(chan XSSResult, len(payloads))
+	var wg sync.WaitGroup
+
 	for _, payload := range payloads {
-		// Construct test URL with payload
-		testURL, err := x.injectPayload(targetURL, parameter, payload)
-		if err != nil {
-			log.Printf("[%s] Failed to construct test URL: %v\n", x.id, err)
-			continue
-		}
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			verified := x.testSingleXSSPayload(targetURL, parameter, p)
+			results <- XSSResult{Payload: p, Verified: verified}
+		}(payload)
+	}
 
-		// Replace localhost for Docker
-		dockerURL := x.replaceLocalhostForDocker(testURL)
+	// Close results channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-		// Send HTTP request
-		response, err := tools.SimpleHTTPGet(x.ctx, x.executor, dockerURL)
-		if err != nil {
-			log.Printf("[%s] HTTP request failed for payload test: %v\n", x.id, err)
-			continue
-		}
-
-		// Check if payload is reflected in response (unescaped)
-		if strings.Contains(response, payload) {
-			log.Printf("[%s] ✅ XSS VERIFIED: Payload reflected unescaped: %s\n", x.id, payload)
+	// Check results - return true on first success
+	for result := range results {
+		if result.Verified {
+			log.Printf("[%s] ✅ XSS VERIFIED: Payload reflected unescaped: %s\n", x.id, result.Payload)
 			return true
 		}
 	}
 
 	log.Printf("[%s] ❌ XSS exploitation failed: No payload reflected\n", x.id)
 	return false
+}
+
+// testSingleXSSPayload tests a single XSS payload
+func (x *XSSSpecialist) testSingleXSSPayload(targetURL, parameter, payload string) bool {
+	// Construct test URL with payload
+	testURL, err := x.injectPayload(targetURL, parameter, payload)
+	if err != nil {
+		log.Printf("[%s] Failed to construct test URL: %v\n", x.id, err)
+		return false
+	}
+
+	// Replace localhost for Docker
+	dockerURL := x.replaceLocalhostForDocker(testURL)
+
+	// Send HTTP request
+	response, err := tools.SimpleHTTPGet(x.ctx, x.executor, dockerURL)
+	if err != nil {
+		log.Printf("[%s] HTTP request failed for payload test: %v\n", x.id, err)
+		return false
+	}
+
+	// Check if payload is reflected in response (unescaped)
+	return strings.Contains(response, payload)
 }
 
 // injectPayload injects the XSS payload into the target URL parameter
