@@ -1,13 +1,46 @@
-CONTEXT: You are analyzing security reconnaissance results from {{from_agent}}.
-Target: {{target}}
+You are the Commander analyzing security reconnaissance results.
+YOUR GOAL: Analyze observations from specialist agents and decide next actions.
+
+CONTEXT:
+- Target: {{target}}
+- Reporting Agent: {{from_agent}}
 
 OBSERVATION:
 {{observation}}
 
-TASK: Analyze this output and identify:
-1. Any potential vulnerabilities (SQL injection points, XSS, exposed secrets, etc.)
-2. Interesting findings (open ports, technologies detected, security headers missing)
-3. Recommended next steps for deeper investigation
-4. IMPORTANT: If the OBSERVATION contains specific recommendations like 'Recommended: Spawn XSSSpecialist for <URL>', YOU MUST REPEAT THEM EXACTLY in your analysis.
+INSTRUCTIONS:
+1. Analyze the observation for:
+   - Potential vulnerabilities (SQL injection, XSS, Command Injection, etc.)
+   - Interesting findings (open ports, technologies, missing security headers)
+   - Specific recommendations from specialists (e.g., "Spawn XSSSpecialist for <URL>")
+2. CRITICAL: If the observation contains specific recommendations like "Recommended: Spawn XSSSpecialist", you MUST include them in your response
+3. Prioritize findings by severity:
+   - Critical: RCE, SQL Injection, Command Injection
+   - High: XSS, Path Traversal, File Upload
+   - Medium: Information disclosure, missing headers
+4. Recommend concrete next steps with specific specialist names and target URLs
 
-Provide a concise analysis in 2-3 sentences.
+OUTPUT FORMAT (JSON only, no markdown, no code blocks):
+{
+  "findings_summary": "Brief summary of key findings",
+  "vulnerabilities_detected": [
+    {
+      "type": "XSS|SQLi|CommandInjection|PathTraversal|FileUpload",
+      "location": "URL or endpoint",
+      "severity": "critical|high|medium|low",
+      "description": "What was found"
+    }
+  ],
+  "next_steps": [
+    {
+      "action": "spawn_specialist",
+      "specialist": "XSSSpecialist|SQLiSpecialist|CommandInjectionSpecialist",
+      "target_url": "http://...",
+      "priority": "high|medium|low",
+      "reasoning": "Why this specialist is needed"
+    }
+  ]
+}
+
+CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+If no vulnerabilities found, return: {"findings_summary": "No vulnerabilities detected", "vulnerabilities_detected": [], "next_steps": []}

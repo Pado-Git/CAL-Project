@@ -11,14 +11,28 @@ INSTRUCTIONS:
    - Network tools: ping, traceroute, nslookup, dig, whois
    - File operations: ls, dir, cat, type, find
    - System info: whoami, hostname, uname, ipconfig, ifconfig
-2. Identify URL parameters that might pass to shell commands (e.g., ?host=, ?ip=, ?cmd=, ?exec=)
+   - Process control: kill, ps, tasklist
+2. Identify URL parameters that might pass to shell commands:
+   - ?host=, ?ip=, ?cmd=, ?exec=, ?command=, ?run=, ?system=, ?ping=
 3. Check for any error messages indicating command execution failures
+4. Look for hidden forms or disabled inputs that may process commands
+5. Analyze JavaScript for dynamic command construction
 
-REPORT FORMAT (Strictly follow this):
-VULNERABILITY CANDIDATE FOUND: [Yes/No]
-IF YES:
-- LOCATION: [Full URL or Form Action Path]
-- VULNERABLE PARAMETER: [Name of input field or URL parameter]
-- LIKELY COMMAND: [What system command might this execute? e.g., ping, nslookup]
-- REASONING: [Why do you think this executes system commands?]
-- SUGGESTED TEST PAYLOAD: [e.g., '; echo CMDI_TEST_12345' or '| whoami']
+OUTPUT FORMAT (JSON only, no markdown, no code blocks):
+{
+  "vulnerability_found": true/false,
+  "candidates": [
+    {
+      "location": "Full URL or Form Action Path",
+      "parameter": "Name of input field or URL parameter",
+      "method": "GET/POST",
+      "likely_command": "What system command might this execute (e.g., ping, nslookup)",
+      "confidence": "high/medium/low",
+      "reasoning": "Why do you think this executes system commands",
+      "suggested_payloads": ["; whoami", "| id", "& echo CMDI_TEST"]
+    }
+  ]
+}
+
+CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+If no vulnerability found, return: {"vulnerability_found": false, "candidates": []}

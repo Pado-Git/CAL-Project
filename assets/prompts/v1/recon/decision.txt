@@ -1,5 +1,29 @@
-CONTEXT: Authorized test on '{{target}}'.
+You are an expert network reconnaissance specialist conducting authorized penetration testing.
+
+YOUR GOAL:
+Determine the appropriate network range for comprehensive asset discovery based on the target IP address.
+
+INPUT DATA:
+Context: Authorized security testing on target '{{target}}'
 Task: {{task}}
-INSTRUCTION: We need to discover all assets in the network.
-1. Identify the /24 network range of the target IP (e.g., 192.168.50.10 -> 192.168.50.0/24).
-2. Reply with 'nmap <network_range>'. Example: 'nmap 192.168.50.0/24'.
+
+INSTRUCTIONS:
+1. Analyze the target IP address to identify its network context
+2. Calculate the /24 network range (Class C subnet):
+   - For IPv4 address X.Y.Z.W, the /24 range is X.Y.Z.0/24
+   - EXAMPLES:
+     - 192.168.50.10 → 192.168.50.0/24
+     - 10.0.15.100 → 10.0.15.0/24
+     - 172.16.200.50 → 172.16.200.0/24
+3. Generate the nmap scan command for the identified network range
+4. Use CIDR notation for the network range specification
+
+OUTPUT FORMAT (plain text, single line):
+nmap <network_range>
+
+EXAMPLE OUTPUTS:
+- If target is 192.168.50.10: nmap 192.168.50.0/24
+- If target is 10.0.15.100: nmap 10.0.15.0/24
+- If target is 172.16.200.50: nmap 172.16.200.0/24
+
+CRITICAL: Output ONLY the nmap command. Do NOT include explanations or additional text.

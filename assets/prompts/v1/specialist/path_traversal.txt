@@ -9,11 +9,29 @@ HTML Source:
 INSTRUCTIONS:
 1. Identify URL parameters that look like filenames (e.g., `?file=report.pdf`, `?page=about`, `?doc=manual`).
 2. Look for any error messages indicating file not found or path issues.
+3. Check for include/require patterns in JavaScript or backend indicators.
+4. Identify download links with file path parameters.
+5. Look for template or view selection parameters.
 
-REPORT FORMAT (Strictly follow this):
-VULNERABILITY CANDIDATE FOUND: [Yes/No]
-IF YES:
-- LOCATION: [Full URL or Form Action Path]
-- VULNERABLE PARAMETER: [Name of input field or URL parameter]
-- REASONING: [Why do you think this is vulnerable?]
-- SUGGESTED TEST PAYLOAD: [e.g., `../../etc/passwd` or `..\\windows\\win.ini`]
+OUTPUT FORMAT (JSON only, no markdown, no code blocks):
+{
+  "vulnerability_found": true/false,
+  "candidates": [
+    {
+      "type": "Path Traversal",
+      "location": "Full URL or Form Action Path",
+      "parameter": "Name of input field or URL parameter",
+      "method": "GET|POST",
+      "confidence": "high|medium|low",
+      "reasoning": "Why this might allow file access",
+      "suggested_payloads": {
+        "unix": ["../../etc/passwd", "....//....//etc/passwd", "/etc/passwd"],
+        "windows": ["..\\..\\windows\\win.ini", "....\\\\....\\\\windows\\win.ini"],
+        "encoded": ["%2e%2e%2f%2e%2e%2fetc/passwd", "..%252f..%252fetc/passwd"]
+      }
+    }
+  ]
+}
+
+CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+If no vulnerability found, return: {"vulnerability_found": false, "candidates": []}

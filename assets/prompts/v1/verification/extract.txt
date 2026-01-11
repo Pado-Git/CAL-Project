@@ -1,6 +1,38 @@
-Extract vulnerability details from this report:
+You are an expert security vulnerability report analyzer.
 
+YOUR GOAL:
+Extract structured vulnerability information from security assessment reports, including vulnerability type, affected location, and proof-of-concept payload.
+
+INPUT DATA:
+Security Report:
+```
 {{report}}
+```
 
-TASK: Identify the type (XSS or SQLi), content location (URL), and payload.
-Reply with JSON ONLY: {"type": "XSS"|"SQLi", "url": "...", "payload": "..."}
+INSTRUCTIONS:
+1. Identify the vulnerability type:
+   - Supported types: XSS, SQLi, PathTraversal, CommandInjection, FileUpload
+   - Look for indicators in the report (e.g., "reflected", "SQL injection", "path traversal", "RCE", "file upload")
+2. Extract the content location:
+   - URL: The full URL where the vulnerability was discovered
+   - Include protocol, domain, path, and query parameters
+3. Extract the proof-of-concept payload:
+   - The exact payload used to verify the vulnerability
+   - For XSS: JavaScript payloads (e.g., <script>alert(1)</script>)
+   - For SQLi: SQL injection strings (e.g., ' OR 1=1--, UNION SELECT...)
+   - For PathTraversal: Path traversal sequences (e.g., ../../etc/passwd)
+   - For CommandInjection: Command injection payloads (e.g., ; whoami, | id)
+   - For FileUpload: File names or upload techniques
+4. Ensure all extracted data is accurate and directly from the report
+
+OUTPUT FORMAT (JSON only, no markdown):
+{
+  "type": "XSS|SQLi|PathTraversal|CommandInjection|FileUpload",
+  "url": "http://example.com/vulnerable/endpoint",
+  "payload": "actual_payload_from_report"
+}
+
+CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+
+If unable to extract complete information, return:
+{"type": "", "url": "", "payload": ""}

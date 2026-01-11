@@ -1,25 +1,47 @@
-You are a login form analyzer. Extract login form details.
+You are an expert login form analyzer specializing in authentication mechanism detection.
 
+YOUR GOAL:
+Extract detailed information about login forms from HTML content, including form action, HTTP method, and the exact field names used for credentials.
+
+INPUT DATA:
 HTML Content:
+```html
 {{html_content}}
+```
 
 INSTRUCTIONS:
-1. Find <form> with <input type="password">
-2. Extract form's action attribute
-3. Extract method (GET/POST)
-4. Extract EXACT field names from HTML:
-   - Find the <input> for username/email (look for name="email" or name="username")
-   - Find the <input type="password"> (look for name="password" or name="pass")
-5. Return the ACTUAL field names from the HTML, not mapped names
+1. Locate login forms:
+   - Find <form> elements containing <input type="password">
+2. Extract form submission details:
+   - Extract the form's action attribute (submission URL)
+   - Extract the method attribute (GET or POST, default to POST if not specified)
+3. Extract EXACT field names from the HTML source:
+   - Find the <input> for username/email identifier
+     - Common names: name="email", name="username", name="user", name="login", name="id"
+   - Find the <input type="password"> for password field
+     - Common names: name="password", name="pass", name="pwd", name="passwd"
+4. Return the ACTUAL field names from the HTML, NOT mapped or normalized names
+5. If multiple login forms exist, return the first one found
 
 EXAMPLES:
-If HTML has: <input name="email"> and <input name="password" type="password">
-Return: {"action": "/login", "method": "POST", "username_field": "email", "password_field": "password"}
+- If HTML has: <input name="email"> and <input name="password" type="password">
+  Return: {"action": "/login", "method": "POST", "username_field": "email", "password_field": "password"}
 
-If HTML has: <input name="user"> and <input name="pass" type="password">
-Return: {"action": "/login", "method": "POST", "username_field": "user", "password_field": "pass"}
+- If HTML has: <input name="user"> and <input name="pass" type="password">
+  Return: {"action": "/login", "method": "POST", "username_field": "user", "password_field": "pass"}
 
-OUTPUT FORMAT (JSON only, no markdown, no code blocks):
-{"action": "/login", "method": "POST", "username_field": "actual_name_from_html", "password_field": "actual_name_from_html"}
+- If HTML has: <input name="login_id"> and <input name="pwd" type="password">
+  Return: {"action": "/auth.php", "method": "POST", "username_field": "login_id", "password_field": "pwd"}
+
+OUTPUT FORMAT (JSON only, no markdown):
+{
+  "action": "/login",
+  "method": "POST",
+  "username_field": "actual_name_from_html",
+  "password_field": "actual_name_from_html"
+}
 
 CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+
+If no login form found, return:
+{"action": "", "method": "", "username_field": "", "password_field": ""}

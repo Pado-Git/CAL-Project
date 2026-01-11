@@ -19,18 +19,24 @@ INSTRUCTIONS:
    - title, contents, subject fields alongside file input
 5. Check client-side validation (accept attribute, JavaScript).
 
-COMMON VULNERABLE PATTERNS:
-- PHP bulletin board systems often use 'act/write.php' for uploads
-- Files typically stored in '/uploads/' directory
-- Lack of extension validation allows .php file upload
+OUTPUT FORMAT (JSON only, no markdown, no code blocks):
+{
+  "vulnerability_found": true/false,
+  "candidates": [
+    {
+      "type": "File Upload",
+      "location": "Full URL or Form Action Path",
+      "parameter": "Name of file input field",
+      "method": "POST",
+      "confidence": "high|medium|low",
+      "upload_endpoint": "Where form submits (e.g., act/write.php)",
+      "potential_upload_path": "Where files are stored (e.g., /uploads/)",
+      "client_validation": "Description of accept attribute or JS validation",
+      "form_parameters": {"type": "value", "title": "text"},
+      "bypass_techniques": ["Double extension (.php.jpg)", "PHTML extension", "Content-Type manipulation"]
+    }
+  ]
+}
 
-REPORT FORMAT (Strictly follow this):
-VULNERABILITY CANDIDATE FOUND: [Yes/No]
-IF YES:
-- LOCATION: [Full URL or Form Action Path]
-- FILE INPUT NAME: [Name attribute of the file input, e.g., 'upload']
-- UPLOAD ENDPOINT: [Where form submits, e.g., 'act/write.php']
-- CLIENT-SIDE VALIDATION: [Yes/No - describe any accept attributes or JS validation]
-- POTENTIAL UPLOAD PATH: [e.g., '/uploads/' if visible in HTML]
-- REASONING: [Why this might be vulnerable - e.g., no extension check, board upload functionality]
-- SUGGESTED TEST: [Upload PHP web shell as 'webshell.php' to test execution in /uploads/ directory]
+CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+If no vulnerability found, return: {"vulnerability_found": false, "candidates": []}

@@ -2,12 +2,14 @@ package specialist
 
 import (
 	"cal-project/internal/brain/llm"
+	"cal-project/internal/brain/prompts"
 	"cal-project/internal/core/agent"
 	"cal-project/internal/core/bus"
 	"cal-project/internal/hands/scripts"
 	"cal-project/internal/hands/tools"
 	"cal-project/internal/hands/trt"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
@@ -789,4 +791,187 @@ func (c *CommandInjectionSpecialist) parseHostIPAddrs(jsonStr string) []string {
 	}
 
 	return ips
+}
+
+// ============================================================================
+// Pattern Matching + LLM Analysis Functions (NEW)
+// ============================================================================
+
+// CMDiCandidate represents a potential command injection vulnerability found by LLM
+type CMDiCandidate struct {
+	Location          string   `json:"location"`
+	Parameter         string   `json:"parameter"`
+	Method            string   `json:"method"`
+	LikelyCommand     string   `json:"likely_command"`
+	Confidence        string   `json:"confidence"`
+	Reasoning         string   `json:"reasoning"`
+	SuggestedPayloads []string `json:"suggested_payloads"`
+}
+
+// CMDiAnalysisResult represents the LLM analysis result
+type CMDiAnalysisResult struct {
+	VulnerabilityFound bool            `json:"vulnerability_found"`
+	Candidates         []CMDiCandidate `json:"candidates"`
+}
+
+// patternMatchCMDi performs fast pattern matching to detect command injection indicators
+// Returns parameter name if found, empty string otherwise
+func (c *CommandInjectionSpecialist) patternMatchCMDi(htmlContent string) (string, string) {
+	lowerHTML := strings.ToLower(htmlContent)
+
+	// Command injection parameter patterns (high confidence)
+	cmdParams := []struct {
+		pattern string
+		param   string
+	}{
+		// Direct command parameters
+		{`name="command"`, "command"},
+		{`name='command'`, "command"},
+		{`name="cmd"`, "cmd"},
+		{`name='cmd'`, "cmd"},
+		{`name="exec"`, "exec"},
+		{`name='exec'`, "exec"},
+		{`name="execute"`, "execute"},
+		{`name='execute'`, "execute"},
+		{`name="system"`, "system"},
+		{`name='system'`, "system"},
+		{`name="run"`, "run"},
+		{`name='run'`, "run"},
+		// Network tool parameters
+		{`name="host"`, "host"},
+		{`name='host'`, "host"},
+		{`name="ip"`, "ip"},
+		{`name='ip'`, "ip"},
+		{`name="ping"`, "ping"},
+		{`name='ping'`, "ping"},
+		{`name="target"`, "target"},
+		{`name='target'`, "target"},
+		{`name="address"`, "address"},
+		{`name='address'`, "address"},
+	}
+
+	// Check for command-related input fields
+	for _, p := range cmdParams {
+		if strings.Contains(lowerHTML, p.pattern) {
+			log.Printf("[%s] Pattern match: found parameter '%s'\n", c.id, p.param)
+			return p.param, "pattern"
+		}
+	}
+
+	// Check for URL parameters in links
+	urlParamPatterns := []struct {
+		pattern *regexp.Regexp
+		param   string
+	}{
+		{regexp.MustCompile(`[?&]cmd=`), "cmd"},
+		{regexp.MustCompile(`[?&]command=`), "command"},
+		{regexp.MustCompile(`[?&]exec=`), "exec"},
+		{regexp.MustCompile(`[?&]host=`), "host"},
+		{regexp.MustCompile(`[?&]ip=`), "ip"},
+		{regexp.MustCompile(`[?&]ping=`), "ping"},
+		{regexp.MustCompile(`[?&]system=`), "system"},
+	}
+
+	for _, p := range urlParamPatterns {
+		if p.pattern.MatchString(lowerHTML) {
+			log.Printf("[%s] Pattern match: found URL parameter '%s'\n", c.id, p.param)
+			return p.param, "url_pattern"
+		}
+	}
+
+	// Check for command execution keywords in context
+	cmdKeywords := []string{
+		"ping", "traceroute", "nslookup", "dig", "whois",
+		"execute command", "run command", "shell", "terminal",
+	}
+
+	for _, keyword := range cmdKeywords {
+		if strings.Contains(lowerHTML, keyword) {
+			// Found keyword, but need more context - return empty to trigger LLM
+			log.Printf("[%s] Pattern match: found keyword '%s', needs LLM analysis\n", c.id, keyword)
+			return "", "needs_llm"
+		}
+	}
+
+	return "", ""
+}
+
+// analyzeCMDiWithLLM uses LLM to analyze HTML for command injection vulnerabilities
+func (c *CommandInjectionSpecialist) analyzeCMDiWithLLM(htmlContent string) *CMDiAnalysisResult {
+	// Limit HTML size for LLM
+	htmlToAnalyze := htmlContent
+	if len(htmlContent) > 8000 {
+		htmlToAnalyze = htmlContent[:8000]
+	}
+
+	prompt := prompts.GetCommandInjectionAnalysis(htmlToAnalyze)
+
+	response, err := c.brain.Generate(c.ctx, prompt)
+	if err != nil {
+		log.Printf("[%s] LLM analysis failed: %v\n", c.id, err)
+		return nil
+	}
+
+	// Clean response (remove markdown code blocks if present)
+	response = strings.TrimSpace(response)
+	if strings.HasPrefix(response, "```json") {
+		response = strings.TrimPrefix(response, "```json")
+		response = strings.TrimSuffix(response, "```")
+		response = strings.TrimSpace(response)
+	} else if strings.HasPrefix(response, "```") {
+		response = strings.TrimPrefix(response, "```")
+		response = strings.TrimSuffix(response, "```")
+		response = strings.TrimSpace(response)
+	}
+
+	// Parse JSON response
+	var result CMDiAnalysisResult
+	if err := json.Unmarshal([]byte(response), &result); err != nil {
+		log.Printf("[%s] Failed to parse LLM JSON: %v\n", c.id, err)
+		log.Printf("[%s] Raw LLM response: %s\n", c.id, response[:min(500, len(response))])
+		return nil
+	}
+
+	return &result
+}
+
+// analyzeTargetForCMDi performs pattern matching first, then LLM analysis if needed
+// Returns the best parameter to test and suggested payloads
+func (c *CommandInjectionSpecialist) analyzeTargetForCMDi(htmlContent string, targetURL string) (string, []string) {
+	// Phase 1: Pattern matching (fast)
+	param, matchType := c.patternMatchCMDi(htmlContent)
+
+	if param != "" && matchType != "needs_llm" {
+		log.Printf("[%s] Pattern match found parameter: %s (type: %s)\n", c.id, param, matchType)
+		// Return with default payloads
+		return param, []string{"; whoami", "| id", "& echo CMDI_TEST", "`id`", "$(whoami)"}
+	}
+
+	// Phase 2: LLM analysis (if pattern match inconclusive or needs confirmation)
+	log.Printf("[%s] Running LLM analysis for command injection detection...\n", c.id)
+	result := c.analyzeCMDiWithLLM(htmlContent)
+
+	if result == nil || !result.VulnerabilityFound || len(result.Candidates) == 0 {
+		log.Printf("[%s] No command injection candidates found by LLM\n", c.id)
+		return "", nil
+	}
+
+	// Use the highest confidence candidate
+	bestCandidate := result.Candidates[0]
+	for _, candidate := range result.Candidates {
+		if candidate.Confidence == "high" {
+			bestCandidate = candidate
+			break
+		}
+	}
+
+	log.Printf("[%s] LLM found candidate: param=%s, confidence=%s, command=%s\n",
+		c.id, bestCandidate.Parameter, bestCandidate.Confidence, bestCandidate.LikelyCommand)
+
+	payloads := bestCandidate.SuggestedPayloads
+	if len(payloads) == 0 {
+		payloads = []string{"; whoami", "| id", "& echo CMDI_TEST"}
+	}
+
+	return bestCandidate.Parameter, payloads
 }

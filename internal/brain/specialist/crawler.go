@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -180,8 +181,132 @@ func (c *CrawlerSpecialist) crawlURL(currentURL string, depth int) {
 	}
 }
 
-// extractLinks uses LLM to extract all links from HTML
+// extractLinks extracts links using pattern matching first, then LLM for complex cases
 func (c *CrawlerSpecialist) extractLinks(httpResponse string, baseURL string) []string {
+	// Phase 1: Pattern matching (fast, handles 80%+ of cases)
+	patternLinks := c.extractLinksWithPattern(httpResponse, baseURL)
+
+	// If pattern matching found enough links, skip LLM
+	if len(patternLinks) >= 3 {
+		log.Printf("[%s] Pattern matching found %d links, skipping LLM\n", c.id, len(patternLinks))
+		return patternLinks
+	}
+
+	// Phase 2: LLM analysis (for complex cases like JavaScript navigation)
+	log.Printf("[%s] Pattern matching found %d links, using LLM for additional extraction\n", c.id, len(patternLinks))
+	llmLinks := c.extractLinksWithLLM(httpResponse, baseURL)
+
+	// Merge results (deduplicate)
+	linkSet := make(map[string]bool)
+	for _, link := range patternLinks {
+		linkSet[link] = true
+	}
+	for _, link := range llmLinks {
+		linkSet[link] = true
+	}
+
+	// Convert back to slice
+	allLinks := make([]string, 0, len(linkSet))
+	for link := range linkSet {
+		allLinks = append(allLinks, link)
+	}
+
+	log.Printf("[%s] Total extracted %d unique links from %s (pattern: %d, LLM: %d)\n",
+		c.id, len(allLinks), baseURL, len(patternLinks), len(llmLinks))
+	return allLinks
+}
+
+// extractLinksWithPattern uses regex patterns to extract links from HTML
+func (c *CrawlerSpecialist) extractLinksWithPattern(htmlContent string, baseURL string) []string {
+	links := make(map[string]bool)
+
+	// Pattern 1: <a href="...">
+	hrefPattern := regexp.MustCompile(`<a[^>]+href\s*=\s*["']([^"'#]+)["']`)
+	matches := hrefPattern.FindAllStringSubmatch(htmlContent, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			href := strings.TrimSpace(match[1])
+			if href != "" && !strings.HasPrefix(href, "javascript:") && !strings.HasPrefix(href, "mailto:") {
+				links[href] = true
+			}
+		}
+	}
+
+	// Pattern 2: <form action="...">
+	formPattern := regexp.MustCompile(`<form[^>]+action\s*=\s*["']([^"']+)["']`)
+	matches = formPattern.FindAllStringSubmatch(htmlContent, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			action := strings.TrimSpace(match[1])
+			if action != "" && action != "#" {
+				links[action] = true
+			}
+		}
+	}
+
+	// Pattern 3: <iframe src="...">
+	iframePattern := regexp.MustCompile(`<iframe[^>]+src\s*=\s*["']([^"']+)["']`)
+	matches = iframePattern.FindAllStringSubmatch(htmlContent, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			src := strings.TrimSpace(match[1])
+			if src != "" {
+				links[src] = true
+			}
+		}
+	}
+
+	// Pattern 4: onclick with location (e.g., onclick="window.location.href='...'")
+	onclickPattern := regexp.MustCompile(`onclick\s*=\s*["'][^"']*(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]`)
+	matches = onclickPattern.FindAllStringSubmatch(htmlContent, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			href := strings.TrimSpace(match[1])
+			if href != "" {
+				links[href] = true
+			}
+		}
+	}
+
+	// Pattern 5: JavaScript window.location assignments
+	jsLocationPattern := regexp.MustCompile(`(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']`)
+	matches = jsLocationPattern.FindAllStringSubmatch(htmlContent, -1)
+	for _, match := range matches {
+		if len(match) > 1 {
+			href := strings.TrimSpace(match[1])
+			if href != "" && !strings.HasPrefix(href, "javascript:") {
+				links[href] = true
+			}
+		}
+	}
+
+	// Pattern 6: URL query parameters (e.g., ?p=page.php)
+	queryPattern := regexp.MustCompile(`\?[a-zA-Z_][a-zA-Z0-9_]*=[^"'\s&<>]+`)
+	matches = queryPattern.FindAllStringSubmatch(htmlContent, -1)
+	for _, match := range matches {
+		if len(match) > 0 {
+			query := strings.TrimSpace(match[0])
+			if query != "" {
+				links[query] = true
+			}
+		}
+	}
+
+	// Resolve relative URLs to absolute
+	absoluteLinks := make([]string, 0, len(links))
+	for link := range links {
+		absoluteURL := c.resolveURL(baseURL, link)
+		if absoluteURL != "" {
+			absoluteLinks = append(absoluteLinks, absoluteURL)
+		}
+	}
+
+	log.Printf("[%s] Pattern matching extracted %d links\n", c.id, len(absoluteLinks))
+	return absoluteLinks
+}
+
+// extractLinksWithLLM uses LLM for complex link extraction (JavaScript navigation, etc.)
+func (c *CrawlerSpecialist) extractLinksWithLLM(httpResponse string, baseURL string) []string {
 	// Limit response size for LLM
 	responseToAnalyze := httpResponse
 	if len(httpResponse) > 8000 {
@@ -228,7 +353,7 @@ func (c *CrawlerSpecialist) extractLinks(httpResponse string, baseURL string) []
 		}
 	}
 
-	log.Printf("[%s] Extracted %d links from %s\n", c.id, len(absoluteLinks), baseURL)
+	log.Printf("[%s] LLM extracted %d links\n", c.id, len(absoluteLinks))
 	return absoluteLinks
 }
 

@@ -1,28 +1,49 @@
-You are a web crawler. Extract all links from the HTML below.
+You are an expert web crawler and link extraction specialist.
 
+YOUR GOAL:
+Extract all navigable links and endpoints from HTML content, including standard links, form actions, JavaScript redirects, and event handler navigation.
+
+INPUT DATA:
 HTML Content:
+```html
 {{html_content}}
+```
 
 Base URL: {{base_url}}
 
 INSTRUCTIONS:
-1. Find all <a href="..."> links
-2. Find all <form action="..."> endpoints
-3. Find JavaScript redirects in <script> tags:
+1. Extract all standard HTML links:
+   - Find all <a href="..."> elements and extract their href attributes
+2. Extract form submission endpoints:
+   - Find all <form action="..."> elements and extract their action attributes
+3. Extract JavaScript redirects from <script> tags:
    - window.location.href="..."
    - window.location="..."
    - location.href="..."
    - location="..."
-4. Find onclick event handlers with navigation:
+4. Extract onclick event handlers with navigation:
    - onclick="window.location.href='...'"
    - onclick="location.href='...'"
    - onclick="window.location='...'"
    - onclick="location='...'"
-   EXAMPLE: <button onclick="window.location.href='?p=write.php&t=freeboard';">write</button>
-   → Extract: ?p=write.php&t=freeboard
-5. Convert relative URLs to absolute URLs using the Base URL
+   - EXAMPLE: <button onclick="window.location.href='?p=write.php&t=freeboard';">write</button>
+     → Extract: ?p=write.php&t=freeboard
+5. URL normalization:
+   - Convert all relative URLs to absolute URLs using the Base URL
+   - Preserve query parameters and fragments
+   - Remove duplicate URLs
 
-OUTPUT FORMAT (JSON only, no markdown, no code blocks):
-{"links": ["http://example.com/page1", "http://example.com/page2"]}
+OUTPUT FORMAT (JSON only, no markdown):
+{
+  "links": [
+    "http://example.com/page1",
+    "http://example.com/page2",
+    "http://example.com/form.php",
+    "http://example.com/?p=write.php&t=freeboard"
+  ]
+}
 
 CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+
+If no links found, return:
+{"links": []}

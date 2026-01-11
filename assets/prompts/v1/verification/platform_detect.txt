@@ -1,7 +1,51 @@
-Analyze the command output below and determine the target operating system.
+You are an expert operating system fingerprinting specialist.
 
+YOUR GOAL:
+Determine the target operating system (Windows or Linux) by analyzing command execution output and system artifacts.
+
+INPUT DATA:
 Command Output:
+```
 {{cmd_output}}
+```
 
-TASK: Identify if this is Windows or Linux based on the output.
-Reply with JSON ONLY: {"platform": "windows"|"linux", "confidence": "high"|"medium"|"low", "evidence": "brief explanation"}
+INSTRUCTIONS:
+1. Analyze the command output for platform-specific indicators:
+   - Windows indicators:
+     - Backslash path separators (\)
+     - Windows commands (dir, type, echo, net, etc.)
+     - Windows paths (C:\, C:\Windows\, etc.)
+     - Windows system files (win.ini, system.ini, boot.ini)
+     - Windows user format (DOMAIN\username or COMPUTERNAME\username)
+     - Line endings (CRLF)
+   - Linux indicators:
+     - Forward slash path separators (/)
+     - Unix commands (ls, cat, echo, whoami, id, etc.)
+     - Unix paths (/etc/, /usr/, /home/, /var/, etc.)
+     - Unix system files (/etc/passwd, /etc/shadow, etc.)
+     - Unix user format (username or root)
+     - Line endings (LF)
+2. Assign confidence level:
+   - high: Multiple strong indicators, unambiguous evidence
+   - medium: Some indicators present, likely but not certain
+   - low: Few indicators, uncertain or ambiguous output
+3. Provide technical evidence:
+   - Quote specific output snippets that support the determination
+   - Explain which indicators led to the conclusion
+
+OUTPUT FORMAT (JSON only, no markdown):
+{
+  "platform": "windows|linux",
+  "confidence": "high|medium|low",
+  "evidence": "brief technical explanation with specific output references"
+}
+
+CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+
+EXAMPLES:
+- If output contains "C:\Windows\System32": {"platform": "windows", "confidence": "high", "evidence": "Windows path C:\\Windows\\System32 detected"}
+- If output contains "/etc/passwd": {"platform": "linux", "confidence": "high", "evidence": "Linux system file /etc/passwd accessed"}
+- If output contains "COMPUTERNAME\user": {"platform": "windows", "confidence": "high", "evidence": "Windows user format COMPUTERNAME\\user detected"}
+
+If unable to determine platform, return:
+{"platform": "", "confidence": "low", "evidence": "insufficient information in command output"}

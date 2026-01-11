@@ -9,12 +9,29 @@ HTML Source:
 INSTRUCTIONS:
 1. Identify forms that look like Search, Login, or Data entry (e.g., `<input name='query'>`, `<input name='id'>`).
 2. Identify URL parameters (e.g., `view.php?id=10`).
-3. Check for any Database Error messages exposed in the text.
+3. Check for any Database Error messages exposed in the text (MySQL, PostgreSQL, MSSQL, Oracle).
+4. Look for numeric parameters that might be used in SQL queries.
+5. Identify hidden fields that might store IDs or references.
 
-REPORT FORMAT (Strictly follow this):
-VULNERABILITY CANDIDATE FOUND: [Yes/No]
-IF YES:
-- LOCATION: [Full URL or Form Action Path]
-- VULNERABLE PARAMETER: [Name of input field]
-- REASONING: [Why do you think this interacts with DB?]
-- SUGGESTED TEST PAYLOAD: [e.g., `' OR '1'='1`]
+OUTPUT FORMAT (JSON only, no markdown, no code blocks):
+{
+  "vulnerability_found": true/false,
+  "candidates": [
+    {
+      "type": "SQL Injection",
+      "location": "Full URL or Form Action Path",
+      "parameter": "Name of input field or URL parameter",
+      "method": "GET|POST",
+      "confidence": "high|medium|low",
+      "reasoning": "Why this likely interacts with database",
+      "suggested_payloads": {
+        "boolean": ["' OR '1'='1", "' AND 1=1--", "' AND 1=2--"],
+        "union": ["' UNION SELECT NULL--", "' UNION SELECT 1,2,3--"],
+        "time": ["' AND SLEEP(5)--", "'; WAITFOR DELAY '0:0:5'--"]
+      }
+    }
+  ]
+}
+
+CRITICAL: Output ONLY raw JSON. Do NOT wrap in ```json or ``` code blocks.
+If no vulnerability found, return: {"vulnerability_found": false, "candidates": []}
