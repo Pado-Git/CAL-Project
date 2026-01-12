@@ -372,6 +372,14 @@ func GetReconDecision(target, task string) string {
 	})
 }
 
+// GetReconDecisionSingleHost returns the prompt for single host port scan (no CIDR expansion)
+func GetReconDecisionSingleHost(target, task string) string {
+	return getFormattedPrompt("decision_single", map[string]interface{}{
+		"target": target,
+		"task":   task,
+	})
+}
+
 // GetXSSAnalysis returns the prompt for XSS analysis
 func GetXSSAnalysis(htmlSource string) string {
 	return getFormattedPrompt("xss_analysis", map[string]interface{}{

@@ -121,11 +121,20 @@ func (c *Commander) Run() error {
 	}
 }
 
-// runSingleTargetMode directly spawns WebSpecialist (skip ReconSpecialist)
+// runSingleTargetMode spawns ReconSpecialist for port scan, then WebSpecialist for target
 func (c *Commander) runSingleTargetMode() error {
-	log.Printf("[%s] SINGLE TARGET MODE: Directly attacking %s\n", c.id, c.target)
+	log.Printf("[%s] SINGLE TARGET MODE: Target %s\n", c.id, c.target)
 
-	// Spawn WebSpecialist directly for the target URL
+	// 1. Extract host from URL
+	host := extractHostFromURL(c.target)
+	log.Printf("[%s] Extracted host: %s\n", c.id, host)
+
+	// 2. Spawn ReconSpecialist for port scan on the host
+	// This will discover other HTTP ports and spawn WebSpecialists for them
+	c.spawnReconSpecialistForHost(host)
+
+	// 3. Also spawn WebSpecialist directly for the original target URL
+	// This runs in parallel with the port scan
 	c.spawnWebSpecialistDirect(c.target)
 
 	return nil
@@ -538,6 +547,70 @@ func (c *Commander) spawnReconSpecialist() {
 
 	// Send initial task
 	c.sendTaskToSpecialist(reconID, "Perform initial reconnaissance on "+c.target)
+}
+
+// spawnReconSpecialistForHost creates a ReconSpecialist for a specific host (Single Mode)
+// This scans ports on the host and spawns WebSpecialists for discovered HTTP services
+func (c *Commander) spawnReconSpecialistForHost(host string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	reconID := "ReconAgent-Single"
+
+	// Check if already exists
+	if _, exists := c.specialists[reconID]; exists {
+		log.Printf("[%s] ReconSpecialist for host already exists, sending task instead\n", c.id)
+		c.sendTaskToSpecialist(reconID, "Scan ports on "+host)
+		return
+	}
+
+	// Determine Executor (TRT Agent or Docker)
+	var executor tools.ToolExecutor
+	var err error
+	var agentPaw string
+
+	if c.trtClient != nil {
+		agents, trtErr := c.trtClient.GetAliveAgents()
+		if trtErr == nil && len(agents) > 0 {
+			agent := agents[0]
+			agentPaw = agent.Paw
+			log.Printf("[%s] Using TRT Agent %s (%s) for port scan\n", c.id, agent.Paw, agent.Platform)
+			executor = trt.NewRemoteExecutor(c.trtClient, agent.Paw, agent.Platform)
+		}
+	}
+
+	if executor == nil {
+		log.Printf("[%s] TRT unavailable, falling back to Docker for port scan\n", c.id)
+		executor, err = docker.NewExecutor(reconID)
+		if err != nil {
+			log.Printf("[%s] Failed to create Docker executor: %v\n", c.id, err)
+			return
+		}
+	}
+
+	// Create ReconSpecialist with host as target (Single Host Mode - no CIDR expansion)
+	log.Printf("[%s] Spawning ReconSpecialist for single host: %s\n", c.id, host)
+	reconAgent := specialist.NewReconSpecialistSingleHost(c.ctx, reconID, c.bus, c.brain, host, executor, c.trtClient, agentPaw)
+
+	// Register specialist
+	c.specialists[reconID] = reconAgent
+
+	// Subscribe to Event Bus
+	c.bus.Subscribe(reconID, func(e bus.Event) {
+		reconAgent.OnEvent(e)
+	})
+
+	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, reconID)
+
+	// Start the specialist
+	utils.SafeGo(reconID, func() {
+		if err := reconAgent.Run(); err != nil {
+			log.Printf("[%s] Specialist %s crashed: %v\n", c.id, reconID, err)
+		}
+	})
+
+	// Send port scan task
+	c.sendTaskToSpecialist(reconID, "Scan ports on "+host)
 }
 
 // spawnWebSpecialist creates and registers a new WebSpecialist
@@ -1272,4 +1345,17 @@ func (c *Commander) isTargetReachable(targetURL string) bool {
 
 	// Any response (even 4xx/5xx) means the host is reachable
 	return true
+}
+
+// extractHostFromURL extracts the hostname from a URL
+func extractHostFromURL(targetURL string) string {
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return targetURL
+	}
+	hostname := u.Hostname()
+	if hostname == "" {
+		return targetURL
+	}
+	return hostname
 }

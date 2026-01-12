@@ -711,7 +711,8 @@ func (c *CommandInjectionSpecialist) reportCompromised(targetURL string, agent t
 
 	// ============================================================================
 	// Create NetworkNode in TRT for the compromised target
-	// Find source NetworkNode using the original agent's IP addresses
+	// First check if a node already exists using hostname-based lookup
+	// This handles Docker IP mismatch (127.0.0.1 vs 172.x.x.x)
 	// ============================================================================
 	if c.trtClient != nil {
 		// Use agent's IP from HostIPAddrs (not Host which is container hostname)
@@ -729,33 +730,55 @@ func (c *CommandInjectionSpecialist) reportCompromised(targetURL string, agent t
 		}
 		role := "COMPROMISED"
 
-		// Find source NetworkNode from the original agent's IP addresses
-		var sourceNodeID int
-		sourceAgent, err := c.getAgentByPaw(c.agentPaw)
-		if err == nil && sourceAgent != nil {
-			// Parse host_ip_addrs JSON array to find matching NetworkNode
-			sourceIPs := c.parseHostIPAddrs(sourceAgent.HostIPAddrs)
-			for _, sourceIP := range sourceIPs {
-				sourceNode, err := c.trtClient.GetNetworkNodeByIP(sourceIP)
-				if err == nil && sourceNode != nil {
-					sourceNodeID = sourceNode.ID
-					log.Printf("[%s] 🔗 Found source NetworkNode: ID=%d, IP=%s\n", c.id, sourceNode.ID, sourceIP)
-					break
-				}
+		// ============================================================================
+		// Check for existing node using hostname-based lookup (deduplication)
+		// This prevents duplicate nodes for localhost/127.0.0.1/172.x.x.x
+		// ============================================================================
+		existingNode, err := c.trtClient.GetNetworkNodeByHostnameOrIP(hostname)
+		if err != nil {
+			log.Printf("[%s] ⚠️ Error checking existing node: %v\n", c.id, err)
+		}
+		if existingNode == nil && ipAddress != hostname {
+			// Also check by IP address
+			existingNode, err = c.trtClient.GetNetworkNodeByHostnameOrIP(ipAddress)
+			if err != nil {
+				log.Printf("[%s] ⚠️ Error checking existing node by IP: %v\n", c.id, err)
 			}
 		}
 
-		// Create NetworkNode with sourceNodeID for edge creation
-		var node *trt.NetworkNode
-		if sourceNodeID > 0 {
-			node, err = c.trtClient.CreateNetworkNode(ipAddress, hostname, role, agent.Platform, true, sourceNodeID)
+		if existingNode != nil {
+			log.Printf("[%s] 🔗 Found existing NetworkNode: ID=%d, IP=%s, Hostname=%s (skipping duplicate creation)\n",
+				c.id, existingNode.ID, existingNode.IPAddress, existingNode.Hostname)
+			// Use existing node instead of creating a new one
 		} else {
-			node, err = c.trtClient.CreateNetworkNode(ipAddress, hostname, role, agent.Platform, true)
-		}
-		if err != nil {
-			log.Printf("[%s] ⚠️ Failed to create NetworkNode for %s: %v\n", c.id, ipAddress, err)
-		} else {
-			log.Printf("[%s] 🌐 NetworkNode created: ID=%d, IP=%s, Role=%s, SourceNodeID=%d\n", c.id, node.ID, node.IPAddress, node.Role, sourceNodeID)
+			// Find source NetworkNode from the original agent's IP addresses
+			var sourceNodeID int
+			sourceAgent, err := c.getAgentByPaw(c.agentPaw)
+			if err == nil && sourceAgent != nil {
+				// Parse host_ip_addrs JSON array to find matching NetworkNode
+				sourceIPs := c.parseHostIPAddrs(sourceAgent.HostIPAddrs)
+				for _, sourceIP := range sourceIPs {
+					sourceNode, err := c.trtClient.GetNetworkNodeByHostnameOrIP(sourceIP)
+					if err == nil && sourceNode != nil {
+						sourceNodeID = sourceNode.ID
+						log.Printf("[%s] 🔗 Found source NetworkNode: ID=%d, IP=%s\n", c.id, sourceNode.ID, sourceIP)
+						break
+					}
+				}
+			}
+
+			// Create NetworkNode with sourceNodeID for edge creation
+			var node *trt.NetworkNode
+			if sourceNodeID > 0 {
+				node, err = c.trtClient.CreateNetworkNode(ipAddress, hostname, role, agent.Platform, true, sourceNodeID)
+			} else {
+				node, err = c.trtClient.CreateNetworkNode(ipAddress, hostname, role, agent.Platform, true)
+			}
+			if err != nil {
+				log.Printf("[%s] ⚠️ Failed to create NetworkNode for %s: %v\n", c.id, ipAddress, err)
+			} else {
+				log.Printf("[%s] 🌐 NetworkNode created: ID=%d, IP=%s, Role=%s, SourceNodeID=%d\n", c.id, node.ID, node.IPAddress, node.Role, sourceNodeID)
+			}
 		}
 	}
 

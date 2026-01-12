@@ -20,27 +20,44 @@ var messageCounter atomic.Uint64
 
 // ReconSpecialist is a specialist agent focused on reconnaissance
 type ReconSpecialist struct {
-	id        string
-	bus       bus.Bus
-	brain     llm.LLM
-	ctx       context.Context
-	target    string
-	executor  tools.ToolExecutor
-	trtClient *trt.Client
-	agentPaw  string // PAW of the agent performing the scan
+	id         string
+	bus        bus.Bus
+	brain      llm.LLM
+	ctx        context.Context
+	target     string
+	executor   tools.ToolExecutor
+	trtClient  *trt.Client
+	agentPaw   string // PAW of the agent performing the scan
+	singleHost bool   // If true, scan only the single host (no CIDR expansion)
 }
 
 // NewReconSpecialist creates a new ReconSpecialist agent
 func NewReconSpecialist(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor, trtClient *trt.Client, agentPaw string) *ReconSpecialist {
 	return &ReconSpecialist{
-		id:        id,
-		bus:       eventBus,
-		brain:     llmClient,
-		ctx:       ctx,
-		target:    target,
-		executor:  executor,
-		trtClient: trtClient,
-		agentPaw:  agentPaw,
+		id:         id,
+		bus:        eventBus,
+		brain:      llmClient,
+		ctx:        ctx,
+		target:     target,
+		executor:   executor,
+		trtClient:  trtClient,
+		agentPaw:   agentPaw,
+		singleHost: false,
+	}
+}
+
+// NewReconSpecialistSingleHost creates a ReconSpecialist for single host scanning (no CIDR)
+func NewReconSpecialistSingleHost(ctx context.Context, id string, eventBus bus.Bus, llmClient llm.LLM, target string, executor tools.ToolExecutor, trtClient *trt.Client, agentPaw string) *ReconSpecialist {
+	return &ReconSpecialist{
+		id:         id,
+		bus:        eventBus,
+		brain:      llmClient,
+		ctx:        ctx,
+		target:     target,
+		executor:   executor,
+		trtClient:  trtClient,
+		agentPaw:   agentPaw,
+		singleHost: true,
 	}
 }
 
@@ -84,7 +101,14 @@ func (r *ReconSpecialist) executeTask(cmdEvent bus.Event) {
 	log.Printf("[%s] Executing: %s\n", r.id, taskDesc)
 
 	// Use LLM to decide what reconnaissance actions to take
-	prompt := prompts.GetReconDecision(r.target, taskDesc)
+	// Use different prompt for single host mode (no CIDR expansion)
+	var prompt string
+	if r.singleHost {
+		log.Printf("[%s] Single host mode: scanning only %s (no CIDR expansion)\n", r.id, r.target)
+		prompt = prompts.GetReconDecisionSingleHost(r.target, taskDesc)
+	} else {
+		prompt = prompts.GetReconDecision(r.target, taskDesc)
+	}
 
 	plan, err := r.brain.Generate(r.ctx, prompt)
 	if err != nil {

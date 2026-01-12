@@ -5,5 +5,12 @@
     "variables": ["target", "task"],
     "output_format": "text",
     "tags": ["recon", "reconnaissance", "network"]
+  },
+  "decision_single": {
+    "file": "recon/decision_single.txt",
+    "version": "1.0.0",
+    "variables": ["target", "task"],
+    "output_format": "text",
+    "tags": ["recon", "reconnaissance", "single-host", "port-scan"]
   }
 }

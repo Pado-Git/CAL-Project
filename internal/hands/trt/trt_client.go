@@ -357,6 +357,74 @@ func (c *Client) GetNetworkNodeByIP(ipAddress string) (*NetworkNode, error) {
 	return nil, nil // Not found, but not an error
 }
 
+// localhostAliases contains all known aliases for localhost
+var localhostAliases = map[string]bool{
+	"localhost":             true,
+	"127.0.0.1":             true,
+	"::1":                   true,
+	"host.docker.internal":  true,
+}
+
+// isLocalhostAlias checks if the given address is a localhost alias
+func isLocalhostAlias(addr string) bool {
+	if localhostAliases[addr] {
+		return true
+	}
+	// Check for Docker internal network IPs (172.x.x.x)
+	if len(addr) > 4 && addr[:4] == "172." {
+		return true
+	}
+	return false
+}
+
+// normalizeHostname normalizes localhost aliases to a canonical form
+func normalizeHostname(hostname string) string {
+	if isLocalhostAlias(hostname) {
+		return "localhost"
+	}
+	return hostname
+}
+
+// GetNetworkNodeByHostnameOrIP finds a network node by hostname or IP address
+// Handles localhost aliases (localhost, 127.0.0.1, host.docker.internal, 172.x.x.x)
+// Returns nil if no matching node is found
+func (c *Client) GetNetworkNodeByHostnameOrIP(hostnameOrIP string) (*NetworkNode, error) {
+	nodes, err := c.GetNetworkNodes()
+	if err != nil {
+		return nil, err
+	}
+
+	// Normalize the input for localhost comparison
+	normalizedInput := normalizeHostname(hostnameOrIP)
+	isInputLocalhost := isLocalhostAlias(hostnameOrIP)
+
+	for _, node := range nodes {
+		// Direct IP match
+		if node.IPAddress == hostnameOrIP {
+			return &node, nil
+		}
+
+		// Direct hostname match
+		if node.Hostname == hostnameOrIP {
+			return &node, nil
+		}
+
+		// Localhost alias matching
+		if isInputLocalhost {
+			// If input is a localhost alias, check if node is also a localhost alias
+			if isLocalhostAlias(node.IPAddress) || isLocalhostAlias(node.Hostname) {
+				return &node, nil
+			}
+			// Also check normalized hostname
+			if normalizeHostname(node.Hostname) == normalizedInput {
+				return &node, nil
+			}
+		}
+	}
+
+	return nil, nil // Not found, but not an error
+}
+
 // ScanResultPort represents a discovered port
 type ScanResultPort struct {
 	Port     int    `json:"port"`
