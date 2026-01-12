@@ -88,6 +88,7 @@ type Agent struct {
 	Username    string `json:"username"`  // User context (e.g., root, SYSTEM)
 	Privilege   string `json:"privilege"` // Elevated, User
 	HostIPAddrs string `json:"host_ip_addrs"` // JSON array string: "[\"192.168.1.1\", \"10.0.0.1\"]"
+	TunnelPort  string `json:"tunnel_port"` // Tunnel listening port ("0" if not enabled)
 }
 
 // GetAliveAgents returns a list of active agents

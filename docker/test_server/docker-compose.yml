@@ -10,8 +10,8 @@ services:
     environment:
       - TZ=Asia/Seoul
     networks:
-      - cai-net
+      - toncal_default  # TRT와 같은 네트워크 사용
 
 networks:
-  cai-net:
-    driver: bridge
+  toncal_default:
+    external: true  # TRT의 기존 네트워크 연결
