@@ -125,10 +125,12 @@ func (w *WebSpecialist) replaceLocalhostForDocker(targetURL string) string {
 
 func (w *WebSpecialist) analyzeForVulnerabilities(httpResponse string) string {
 	// Limit response size for LLM
-	responseToAnalyze := httpResponse
-	if len(httpResponse) > 3000 {
-		responseToAnalyze = httpResponse[:3000]
-	}
+	responseToAnalyze := httpResponse    
+    // 너무 길면 경고만 출력
+    if len(httpResponse) > 10000 {
+        log.Printf("[%s] Warning: Large response (%d chars), analysis may take longer\n", 
+            w.id, len(httpResponse))
+    }
 
 	// Use LLM to analyze HTTP response for security issues (JSON output)
 	prompt := prompts.GetWebAnalysis(responseToAnalyze)

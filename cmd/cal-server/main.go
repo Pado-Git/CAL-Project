@@ -25,17 +25,38 @@ import (
 func main() {
 	// CLI Flags for targeting
 	var (
-		enableRAG  = flag.Bool("enable-rag", false, "Enable RAG mode for prompt management")
-		ragShort   = flag.Bool("rag", false, "Enable RAG mode (short flag)")
+		enableRAG = flag.Bool("enable-rag", false, "Enable RAG mode for prompt management")
+		ragShort  = flag.Bool("rag", false, "Enable RAG mode (short flag)")
 
-		// NEW: Targeting flags
+		// Targeting flags
 		targetMode = flag.String("mode", "network", "Execution mode: 'single' or 'network'")
 		targetURL  = flag.String("url", "", "Target URL (overrides .env TARGET_URL)")
 		loginEmail = flag.String("email", "", "Login email (overrides .env LOGIN_EMAIL)")
 		loginPass  = flag.String("password", "", "Login password (overrides .env LOGIN_PASSWORD)")
+
+		// Deep Dive flags (network exploration after compromising targets)
+		// Single Mode: deep-dive OFF by default, use --deep-dive to enable
+		// Network Mode: deep-dive ON by default, use --no-deep-dive to disable
+		deepDive   = flag.Bool("deep-dive", false, "Enable deep network exploration after compromising targets (Single Mode)")
+		deepDiveD  = flag.Bool("d", false, "Short for --deep-dive")
+		noDeepDive = flag.Bool("no-deep-dive", false, "Disable deep network exploration (Network Mode)")
+		maxDepth   = flag.Int("max-depth", 3, "Maximum exploration depth (1-5), requires deep-dive enabled")
 	)
 
 	flag.Parse()
+
+	// Validate Deep Dive flags
+	effectiveDeepDive := *deepDive || *deepDiveD
+
+	// --deep-dive and --no-deep-dive cannot be used together
+	if effectiveDeepDive && *noDeepDive {
+		log.Fatal("Error: --deep-dive and --no-deep-dive cannot be used together")
+	}
+
+	// Validate max-depth range
+	if *maxDepth < 1 || *maxDepth > 5 {
+		log.Fatal("Error: --max-depth must be between 1 and 5")
+	}
 
 	// Setup Multi-writer logging (Console + File)
 	logFile, err := os.OpenFile("cal-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
@@ -131,15 +152,29 @@ func main() {
 		log.Fatalf("Invalid mode: %s (must be 'single' or 'network')", finalMode)
 	}
 
+	// Calculate final deep-dive setting based on mode
+	// Single Mode: default OFF, --deep-dive enables
+	// Network Mode: default ON, --no-deep-dive disables
+	finalDeepDive := effectiveDeepDive
+	if finalMode == "network" {
+		finalDeepDive = !*noDeepDive // Network mode: ON by default unless --no-deep-dive
+	}
+
+	// Validate: --max-depth requires deep-dive enabled (only if changed from default)
+	if *maxDepth != 3 && !finalDeepDive {
+		log.Fatal("Error: --max-depth requires --deep-dive (single mode) or enabled deep-dive (network mode)")
+	}
+
 	log.Printf("========================================")
 	log.Printf("Execution Mode: %s", finalMode)
 	log.Printf("Target URL: %s", finalURL)
 	if finalEmail != "" {
 		log.Printf("Credentials: %s / ********", finalEmail)
 	}
+	log.Printf("Deep Dive: %v (max-depth: %d)", finalDeepDive, *maxDepth)
 	log.Printf("========================================")
 
-	cmdr := commander.NewCommander(ctx, eventBus, llmClient, finalURL, finalMode, finalEmail, finalPassword, trtClient)
+	cmdr := commander.NewCommander(ctx, eventBus, llmClient, finalURL, finalMode, finalEmail, finalPassword, trtClient, finalDeepDive, *maxDepth)
 	orch.RegisterAgent(cmdr)
 
 	// 6. Initialize Reporter Agent

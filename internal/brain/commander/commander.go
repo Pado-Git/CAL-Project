@@ -38,16 +38,16 @@ type VulnerabilityCandidate struct {
 
 // Commander is the strategic leader agent
 type Commander struct {
-	id            string
-	bus           bus.Bus
-	brain         llm.LLM
-	ctx           context.Context
+	id    string
+	bus   bus.Bus
+	brain llm.LLM
+	ctx   context.Context
 
 	// Target configuration
-	target        string
-	mode          string // "single" or "network"
-	email         string // Login credentials
-	password      string // Login credentials
+	target   string
+	mode     string // "single" or "network"
+	email    string // Login credentials
+	password string // Login credentials
 
 	trtClient     *trt.Client
 	specialists   map[string]agent.Agent
@@ -55,23 +55,33 @@ type Commander struct {
 	sessionCookie string          // Session cookie for authenticated requests
 	crawledURLs   map[string]bool // Base URLs that have been crawled
 	mu            sync.RWMutex
+
+	// Deep Dive configuration (network exploration after compromising targets)
+	deepDiveEnabled bool
+	maxDepth        int
+	currentDepth    int
+	scannedSubnets  map[string]bool // Already scanned subnets (duplicate prevention)
 }
 
 // NewCommander creates a new Commander agent
-func NewCommander(ctx context.Context, eventBus bus.Bus, llmClient llm.LLM, targetURL string, mode string, email string, password string, trtClient *trt.Client) *Commander {
+func NewCommander(ctx context.Context, eventBus bus.Bus, llmClient llm.LLM, targetURL string, mode string, email string, password string, trtClient *trt.Client, deepDive bool, maxDepth int) *Commander {
 	return &Commander{
-		id:          "Commander-01",
-		bus:         eventBus,
-		brain:       llmClient,
-		ctx:         ctx,
-		target:      targetURL,
-		mode:        mode,
-		email:       email,
-		password:    password,
-		trtClient:   trtClient,
-		specialists: make(map[string]agent.Agent),
-		counters:    make(map[string]int),
-		crawledURLs: make(map[string]bool),
+		id:              "Commander-01",
+		bus:             eventBus,
+		brain:           llmClient,
+		ctx:             ctx,
+		target:          targetURL,
+		mode:            mode,
+		email:           email,
+		password:        password,
+		trtClient:       trtClient,
+		specialists:     make(map[string]agent.Agent),
+		counters:        make(map[string]int),
+		crawledURLs:     make(map[string]bool),
+		deepDiveEnabled: deepDive,
+		maxDepth:        maxDepth,
+		currentDepth:    0,
+		scannedSubnets:  make(map[string]bool),
 	}
 }
 
@@ -195,6 +205,14 @@ func (c *Commander) OnEvent(event bus.Event) {
 
 	case bus.Error:
 		log.Printf("[%s] ❌ Error received from %s: %v\n", c.id, event.FromAgent, event.Payload)
+
+	case bus.Compromised:
+		// New agent deployed via RCE - trigger Deep Dive if enabled
+		if c.deepDiveEnabled {
+			c.handleCompromised(event)
+		} else {
+			log.Printf("[%s] 🎯 Agent compromised (deep-dive disabled, skipping network exploration)\n", c.id)
+		}
 	}
 }
 
@@ -1358,4 +1376,150 @@ func extractHostFromURL(targetURL string) string {
 		return targetURL
 	}
 	return hostname
+}
+
+// handleCompromised processes new agent registration and triggers Deep Dive network exploration
+func (c *Commander) handleCompromised(event bus.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// 1. Depth check - stop if max depth reached
+	if c.currentDepth >= c.maxDepth {
+		log.Printf("[%s] 🛑 Max depth reached (%d/%d), stopping exploration\n",
+			c.id, c.currentDepth, c.maxDepth)
+		return
+	}
+
+	// 2. Extract agent info from event payload
+	data, ok := event.Payload.(map[string]interface{})
+	if !ok {
+		log.Printf("[%s] Invalid Compromised event data format\n", c.id)
+		return
+	}
+
+	agentPaw, _ := data["agent_paw"].(string)
+	host, _ := data["host"].(string)
+	platform, _ := data["platform"].(string)
+
+	if agentPaw == "" || host == "" {
+		log.Printf("[%s] Missing agent info in Compromised event\n", c.id)
+		return
+	}
+
+	log.Printf("[%s] 🎯 New agent detected: PAW=%s, Host=%s, Platform=%s\n",
+		c.id, agentPaw, host, platform)
+
+	// 3. Calculate subnet from host IP (e.g., 172.20.0.15 → 172.20.0.0/24)
+	subnet := c.calculateSubnet(host)
+
+	// 4. Duplicate scan prevention
+	if c.scannedSubnets[subnet] {
+		log.Printf("[%s] ⏭️ Subnet %s already scanned, skipping\n", c.id, subnet)
+		return
+	}
+	c.scannedSubnets[subnet] = true
+
+	// 5. Spawn ReconSpecialist for the new subnet via the newly deployed agent
+	c.currentDepth++
+	log.Printf("[%s] 🔍 Starting deep dive: Depth=%d/%d, Subnet=%s, Agent=%s\n",
+		c.id, c.currentDepth, c.maxDepth, subnet, agentPaw)
+
+	// Release lock before spawning (spawnReconSpecialistForSubnet acquires its own lock)
+	c.mu.Unlock()
+	c.spawnReconSpecialistForSubnet(subnet, agentPaw, platform)
+	c.mu.Lock() // Re-acquire for defer
+}
+
+// calculateSubnet extracts /24 subnet from IP address
+func (c *Commander) calculateSubnet(host string) string {
+	// Try to parse as IP
+	ip := parseIP(host)
+	if ip == nil {
+		// Hostname case - return as-is (will be unique per host)
+		return host
+	}
+
+	// IPv4 /24 subnet calculation
+	if len(ip) >= 4 {
+		return fmt.Sprintf("%d.%d.%d.0/24", ip[0], ip[1], ip[2])
+	}
+
+	return host
+}
+
+// parseIP parses IP address string to byte slice
+func parseIP(host string) []byte {
+	parts := strings.Split(host, ".")
+	if len(parts) != 4 {
+		return nil
+	}
+
+	ip := make([]byte, 4)
+	for i, part := range parts {
+		var val int
+		_, err := fmt.Sscanf(part, "%d", &val)
+		if err != nil || val < 0 || val > 255 {
+			return nil
+		}
+		ip[i] = byte(val)
+	}
+	return ip
+}
+
+// spawnReconSpecialistForSubnet spawns a ReconSpecialist to scan a subnet via a specific agent
+// This is used for Deep Dive network exploration after compromising a target
+func (c *Commander) spawnReconSpecialistForSubnet(subnet string, agentPaw string, platform string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Generate unique ID for this depth/subnet
+	reconID := fmt.Sprintf("ReconAgent-Depth%d-%s", c.currentDepth, strings.Replace(subnet, "/", "-", -1))
+
+	// Check if already exists
+	if _, exists := c.specialists[reconID]; exists {
+		log.Printf("[%s] ReconSpecialist %s already exists\n", c.id, reconID)
+		return
+	}
+
+	// Create executor using the specified agent
+	var executor tools.ToolExecutor
+	if c.trtClient != nil {
+		log.Printf("[%s] Using TRT Agent %s (%s) for subnet scan\n", c.id, agentPaw, platform)
+		executor = trt.NewRemoteExecutor(c.trtClient, agentPaw, platform)
+	}
+
+	if executor == nil {
+		// Fallback to Docker if TRT not available
+		log.Printf("[%s] TRT unavailable, falling back to Docker for subnet scan\n", c.id)
+		var err error
+		executor, err = docker.NewExecutor(reconID)
+		if err != nil {
+			log.Printf("[%s] Failed to create executor for subnet scan: %v\n", c.id, err)
+			return
+		}
+	}
+
+	// Create ReconSpecialist targeting the subnet (CIDR mode)
+	log.Printf("[%s] Spawning ReconSpecialist for subnet: %s via agent %s\n", c.id, subnet, agentPaw)
+	reconAgent := specialist.NewReconSpecialist(c.ctx, reconID, c.bus, c.brain, subnet, executor, c.trtClient, agentPaw)
+
+	// Register specialist
+	c.specialists[reconID] = reconAgent
+
+	// Subscribe to Event Bus
+	c.bus.Subscribe(reconID, func(e bus.Event) {
+		reconAgent.OnEvent(e)
+	})
+
+	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, reconID)
+
+	// Start the specialist
+	utils.SafeGo(reconID, func() {
+		if err := reconAgent.Run(); err != nil {
+			log.Printf("[%s] Specialist %s crashed: %v\n", c.id, reconID, err)
+		}
+	})
+
+	// Send scan task
+	c.sendTaskToSpecialist(reconID, fmt.Sprintf("Scan subnet %s via agent %s for HTTP services", subnet, agentPaw))
 }

@@ -841,7 +841,13 @@ func (c *CommandInjectionSpecialist) reportCompromised(targetURL string, agent t
 		Type:      bus.Compromised,
 		Payload:   compromised,
 	}
+
+	// Send to Reporter for report generation
 	c.bus.Publish("Reporter-01", event)
+
+	// Send to Commander for Deep Dive network exploration
+	// Commander will trigger subnet scan if deep-dive is enabled
+	c.bus.Publish("Commander-01", event)
 
 	log.Printf("[%s] 💀 COMPROMISED: Target %s now has active agent %s\n", c.id, targetURL, agent.Paw)
 }
