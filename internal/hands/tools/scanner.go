@@ -12,7 +12,7 @@ import (
 
 // 스캔 설정 상수
 const (
-	PortTimeout           = 500 * time.Millisecond
+	PortTimeout           = 3 * time.Second // 3초 타임아웃 (고지연 네트워크 대응)
 	MaxConcurrentHosts    = 50
 	MaxConcurrentPorts    = 100
 	MaxConcurrentSubnets  = 10  // 병렬 서브넷 스캔 수
@@ -270,7 +270,7 @@ func FormatAsNmap(results []ScanResult, scanDuration time.Duration) string {
 
 	// 헤더
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	sb.WriteString(fmt.Sprintf("Starting Nmap 7.80 ( https://nmap.org ) at %s UTC\n", now))
+	sb.WriteString(fmt.Sprintf("Starting Custom Nmap (Go TCP Scanner) at %s UTC\n", now))
 
 	hostsUp := len(results)
 

@@ -271,8 +271,15 @@ func (c *Commander) analyzeObservation(fromAgent string, observation string) {
 			go c.spawnWebSpecialist(targetURL)
 		}
 
-		// If we found HTTP hosts, we can skip LLM analysis (already handled)
-		if len(httpHosts) > 0 {
+		// Check for RDP port 3389 (BlueKeep target)
+		rdpHosts := c.parseNmapForRDPPorts(observation)
+		for _, host := range rdpHosts {
+			log.Printf("[%s] 🔓 Detected RDP service on: %s - spawning RDPSpecialist for BlueKeep\n", c.id, host)
+			go c.spawnRDPSpecialistFromScan(host)
+		}
+
+		// If we found HTTP or RDP hosts, we can skip LLM analysis (already handled)
+		if len(httpHosts) > 0 || len(rdpHosts) > 0 {
 			return
 		}
 	}
@@ -1135,6 +1142,57 @@ func (c *Commander) parseNmapForHTTPPorts(nmapOutput string) []string {
 	return httpHosts
 }
 
+// parseNmapForRDPPorts parses nmap output and extracts hosts with RDP port 3389
+func (c *Commander) parseNmapForRDPPorts(nmapOutput string) []string {
+	var rdpHosts []string
+
+	// Regular expression patterns
+	hostPattern := regexp.MustCompile(`Nmap scan report for ([\d\.]+)`)
+	// Match: "3389/tcp   open  ms-wbt-server" or "3389/tcp open"
+	rdpPattern := regexp.MustCompile(`(?m)^3389/tcp\s+open`)
+
+	// Split by host sections
+	hostSections := strings.Split(nmapOutput, "Nmap scan report for")
+
+	for _, section := range hostSections[1:] {
+		hostMatch := hostPattern.FindStringSubmatch("Nmap scan report for" + section)
+		if len(hostMatch) < 2 {
+			continue
+		}
+		ip := hostMatch[1]
+
+		// Check for RDP port
+		if rdpPattern.MatchString(section) {
+			rdpHosts = append(rdpHosts, ip)
+			log.Printf("[%s] 🔓 Detected RDP service on: %s\n", c.id, ip)
+		}
+	}
+
+	return rdpHosts
+}
+
+// spawnRDPSpecialistFromScan creates RDP specialist when port 3389 is discovered in scan
+func (c *Commander) spawnRDPSpecialistFromScan(target string) {
+	// Get an available agent to use as attacker
+	if c.trtClient == nil {
+		log.Printf("[%s] Cannot spawn RDPSpecialist: TRT Client not available\n", c.id)
+		return
+	}
+
+	agents, err := c.trtClient.GetAliveAgents()
+	if err != nil || len(agents) == 0 {
+		log.Printf("[%s] Cannot spawn RDPSpecialist: No agents available (err: %v)\n", c.id, err)
+		return
+	}
+
+	// Use the first available agent as attacker
+	agent := agents[0]
+	log.Printf("[%s] Using agent %s (%s) for BlueKeep exploitation\n", c.id, agent.Paw, agent.Platform)
+
+	// Spawn RDP specialist with default RDP port 3389
+	c.spawnRDPSpecialist(target, 3389, agent.Paw, agent.Platform)
+}
+
 // handleSessionCookie processes session cookie from LoginSpecialist
 func (c *Commander) handleSessionCookie(observation string) {
 	// Extract content between markers
@@ -1522,4 +1580,48 @@ func (c *Commander) spawnReconSpecialistForSubnet(subnet string, agentPaw string
 
 	// Send scan task
 	c.sendTaskToSpecialist(reconID, fmt.Sprintf("Scan subnet %s via agent %s for HTTP services", subnet, agentPaw))
+}
+
+// spawnRDPSpecialist creates RDP specialist for BlueKeep exploitation
+// target: IP address of the vulnerable RDP host
+// port: RDP port (usually 3389)
+// attackerPaw: PAW of the agent that will execute the exploit
+func (c *Commander) spawnRDPSpecialist(target string, port int, attackerPaw string, platform string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Generate unique ID
+	c.counters["RDPSpec"]++
+	count := c.counters["RDPSpec"]
+	rdpID := fmt.Sprintf("RDPSpec-%02d", count)
+
+	if _, exists := c.specialists[rdpID]; exists {
+		return
+	}
+
+	if c.trtClient == nil {
+		log.Printf("[%s] Cannot spawn RDPSpecialist: TRT Client not available\n", c.id)
+		return
+	}
+
+	log.Printf("[%s] 🔓 Spawning RDPSpecialist for BlueKeep exploitation: %s:%d via Agent %s\n",
+		c.id, target, port, attackerPaw)
+
+	rdpAgent := specialist.NewRDPSpecialist(c.ctx, rdpID, c.bus, target, port, attackerPaw, platform, c.trtClient)
+	c.specialists[rdpID] = rdpAgent
+
+	c.bus.Subscribe(rdpID, func(e bus.Event) {
+		rdpAgent.OnEvent(e)
+	})
+
+	log.Printf("[%s] Subscribed %s to Event Bus\n", c.id, rdpID)
+
+	utils.SafeGo(rdpID, func() {
+		if err := rdpAgent.Run(); err != nil {
+			log.Printf("[%s] RDPSpecialist crashed: %v\n", c.id, err)
+		}
+	})
+
+	// Send task to execute BlueKeep exploit
+	c.sendTaskToSpecialist(rdpID, fmt.Sprintf("Execute BlueKeep (CVE-2019-0708) exploit on %s:%d", target, port))
 }
